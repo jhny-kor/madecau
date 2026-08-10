@@ -42,6 +42,9 @@ ID_REQ_SUBMIT = 1037        # 신청 버튼
 DETAIL_TITLE_RE = r"문서반출.*"
 ID_DETAIL_DOWNLOAD = 1057   # 파일다운 버튼
 
+# 우리가 여는 창들. 메시지박스 청소 대상에서 뺀다.
+KNOWN_TITLES = (MAIN_TITLE, REQ_TITLE, "문서반출")
+
 # 열기/저장 대화상자 제목. 구조로도 판별하므로 목록에 없어도 동작한다.
 FILE_DIALOG_TITLES = ("열기", "Open", "다른 이름으로 저장", "Save",
                       "파일 선택", "폴더", "Folder", "찾아보기", "Browse")
@@ -125,9 +128,10 @@ class Aborted(RuntimeError):
 
 
 class MarkAny:
-    def __init__(self):
+    def __init__(self, stop: "threading.Event | None" = None):
         from pywinauto import Application  # Windows 전용이라 지연 import
 
+        self.stop = stop
         self.app = Application(backend="win32").connect(title=MAIN_TITLE, timeout=15)
         self.main = self.app.window(title=MAIN_TITLE)
         self.main.wait("visible ready", timeout=15)
@@ -142,6 +146,7 @@ class MarkAny:
         return w
 
     def _click(self, parent, control_id, name=""):
+        self._guard()
         btn = parent.child_window(control_id=control_id)
         btn.wait("visible enabled", timeout=15)
         btn.click_input()
@@ -149,6 +154,7 @@ class MarkAny:
         time.sleep(0.3)
 
     def _set_text(self, parent, control_id, text, name=""):
+        self._guard()
         edit = parent.child_window(control_id=control_id, class_name="Edit")
         edit.wait("visible enabled", timeout=15)
         edit.set_edit_text(text)
@@ -165,39 +171,65 @@ class MarkAny:
         return out
 
     def _guard(self):
+        if self.stop is not None and self.stop.is_set():
+            raise Aborted("사용자가 중지했습니다.")
         for title, _ in self._visible_dialogs():
             for kw in ABORT_KEYWORDS:
                 if kw in title:
                     raise Aborted(f"사람이 처리해야 하는 화면입니다: {title!r}")
 
-    def _dismiss_messageboxes(self, known_titles, seconds=3.0):
-        """신청 확인/완료 같은 작은 메시지박스를 확인 버튼으로 닫는다."""
-        end = time.time() + seconds
-        while time.time() < end:
+    def _dismiss_messageboxes(self, seconds=3.0, hard_limit=30.0):
+        """신청 확인/완료 같은 작은 메시지박스를 확인 버튼으로 닫는다.
+
+        같은 창을 두 번 눌러도 안 닫히면 더 누르지 않는다. 예전에는 눌릴
+        때마다 마감 시각을 늘려서, 안 닫히는 창 하나에 영원히 매달렸다.
+        """
+        deadline = time.time() + seconds
+        hard_end = time.time() + hard_limit
+        tries: dict[int, int] = {}
+        while time.time() < deadline and time.time() < hard_end:
             self._guard()
             for title, w in self._visible_dialogs():
-                if any(k in title for k in known_titles):
+                if any(k in title for k in KNOWN_TITLES):
+                    continue
+                if tries.get(w.handle, 0) >= 2:
                     continue
                 btn = self._find_button(w, OK_TEXTS)
-                if btn is not None:
-                    log.info("메시지박스 닫기: %r", title)
-                    btn.click_input()
-                    time.sleep(0.5)
-                    end = time.time() + seconds
+                if btn is None:
+                    continue
+                log.info("메시지박스 닫기: %r", title)
+                btn.click_input()
+                tries[w.handle] = tries.get(w.handle, 0) + 1
+                time.sleep(0.5)
+                if self._alive(w):
+                    log.warning("%r 창이 닫히지 않았습니다 (%d회).", title, tries[w.handle])
+                else:
+                    deadline = time.time() + seconds  # 실제로 닫혔을 때만 연장
+                break
             time.sleep(0.3)
 
     @staticmethod
     def _find_button(win, texts):
+        """텍스트가 일치하는 버튼. 진짜 Button 을 우선한다.
+
+        Static 라벨을 눌러봐야 아무 일도 안 일어난다. 예전에는 그걸 눌러놓고
+        닫혔다고 여겨 같은 창을 계속 두드렸다.
+        """
+        wanted = {x.replace("&", "") for x in texts}
+        loose = None
         for c in win.descendants():
             try:
-                t = c.window_text()
+                t = (c.window_text() or "").strip().replace("&", "")
                 cls = c.friendly_class_name()
             except Exception:
                 continue
-            if t and any(t.strip() == x or t.strip() == x.replace("&", "") for x in texts):
-                if cls in ("Button", "Pane", "CheckBox", "Static"):
-                    return c
-        return None
+            if t not in wanted:
+                continue
+            if cls == "Button":
+                return c
+            if loose is None and cls in ("CheckBox", "Pane"):
+                loose = c
+        return loose
 
     @staticmethod
     def _find_by_text(win, needle):
@@ -414,7 +446,7 @@ class MarkAny:
         return True
 
     def _cancel_dialog(self, dlg):
-        self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=2)
+        self._dismiss_messageboxes(seconds=2)
         cancel = self._button(dlg, 2)
         if cancel is not None:
             cancel.click_input()
@@ -493,7 +525,7 @@ class MarkAny:
         self._set_text(req, ID_REQ_REASON, reason, "사유")
 
         self._click(req, ID_REQ_SUBMIT, "신청")
-        self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=4)
+        self._dismiss_messageboxes(seconds=4)
         req.wait_not("visible", timeout=30)
         log.info("신청 완료 (%d개)", len(files))
 
@@ -518,6 +550,7 @@ class MarkAny:
         # 복호화에 시간이 걸리므로 파일이 나타날 때까지 기다린다.
         end = time.time() + 180
         while True:
+            self._guard()
             missing = [f.name for f in files if not (dest / f.name).exists()]
             if not missing or time.time() > end:
                 break
@@ -526,6 +559,13 @@ class MarkAny:
             raise RuntimeError(
                 f"{len(missing)}개가 원본 파일명으로 저장되지 않았습니다: {missing[:3]}"
             )
+        # 배치마다 닫는다. 남겨두면 다음 배치가 이 창을 최신 건으로 착각한다.
+        try:
+            detail.close()
+            time.sleep(0.5)
+        except Exception as e:  # noqa: BLE001
+            log.warning("문서반출 창을 닫지 못했습니다: %s", e)
+
         log.info("다운로드 %d개 저장: %s", len(files), dest)
         return len(files)
 
@@ -592,6 +632,27 @@ class MarkAny:
             done += self.download_latest(dest, batch)
         log.info("끝. 요청 %d개 / 저장 %d개", total, done)
         return done
+
+
+def watch_stop_key(stop: threading.Event, finished: threading.Event, poll=0.1):
+    """ESC 를 누르면 중지 플래그를 세운다.
+
+    자동화가 마우스와 포커스를 가져가므로 GUI 창의 키 바인딩은 안 먹는다.
+    포커스와 무관하게 눌림을 읽는 GetAsyncKeyState 로 확인한다.
+    """
+    import ctypes
+
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetAsyncKeyState.restype = ctypes.c_short
+    except AttributeError:  # 윈도우가 아니면 ESC 감시 없이 중지 버튼만
+        return
+    VK_ESCAPE = 0x1B
+    while not stop.is_set() and not finished.is_set():
+        if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+            stop.set()
+            return
+        time.sleep(poll)
 
 
 def dump_windows(out_path: Path | None = None):
@@ -691,9 +752,15 @@ def gui():
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("실패", str(e))
 
+    stop = threading.Event()
+    finished = threading.Event()
+
     ttk.Button(btns, text="창 구조 저장", command=save_dump).pack(side="left")
+    ttk.Label(btns, text="  진행 중 ESC 를 누르면 중지").pack(side="left")
     start_btn = ttk.Button(btns, text="시작")
     start_btn.pack(side="right")
+    stop_btn = ttk.Button(btns, text="중지", state="disabled")
+    stop_btn.pack(side="right", padx=4)
 
     class GuiHandler(logging.Handler):
         def emit(self, record):
@@ -709,12 +776,18 @@ def gui():
 
     def worker(files, dest, subject):
         try:
-            MarkAny().run(files, dest, subject, subject)
+            MarkAny(stop).run(files, dest, subject, subject)
             msgs.put("완료되었습니다.")
         except Exception as e:  # noqa: BLE001
             log.error("중단: %s", e)
         finally:
-            root.after(0, lambda: start_btn.configure(state="normal"))
+            finished.set()
+            root.after(0, lambda: (start_btn.configure(state="normal"),
+                                   stop_btn.configure(state="disabled")))
+
+    def request_stop():
+        stop.set()
+        msgs.put("중지 요청됨. 진행 중인 단계가 끝나면 멈춥니다.")
 
     def start():
         files = collect_files(paths)
@@ -727,12 +800,19 @@ def gui():
             return
         dest.mkdir(parents=True, exist_ok=True)
         setup_logging(dest, GuiHandler())
-        log.info("대상 %d개 파일, %d배치", len(files), -(-len(files) // BATCH_SIZE))
+        log.info("대상 %d개 파일, %d배치 (중지: ESC)",
+                 len(files), -(-len(files) // BATCH_SIZE))
+        stop.clear()
+        finished.clear()
         start_btn.configure(state="disabled")
+        stop_btn.configure(state="normal")
+        threading.Thread(target=watch_stop_key, args=(stop, finished),
+                         daemon=True).start()
         threading.Thread(target=worker, args=(files, dest, subject_var.get()),
                          daemon=True).start()
 
     start_btn.configure(command=start)
+    stop_btn.configure(command=request_stop)
     pump()
     root.mainloop()
 
@@ -800,6 +880,27 @@ def selftest():
 
         def descendants(self):
             return self._children
+
+    # 메시지박스의 "확인"은 Static 라벨이 아니라 진짜 Button 이어야 한다.
+    # Static 을 눌러봐야 창이 안 닫혀서 같은 창을 계속 두드리게 된다.
+    class _Named(_Ctrl):
+        def __init__(self, cls, text):
+            super().__init__(cls, 0)
+            self._text = text
+
+        def window_text(self):
+            return self._text
+
+        def friendly_class_name(self):
+            return self._cls
+
+    label = _Named("Static", "확인")
+    button = _Named("Button", "확인")
+    assert MarkAny._find_button(_Win([label, button]), OK_TEXTS) is button
+    assert MarkAny._find_button(_Win([button, label]), OK_TEXTS) is button
+    assert MarkAny._find_button(_Win([label]), OK_TEXTS) is None  # 라벨뿐이면 포기
+    assert MarkAny._find_button(_Win([_Named("Button", "취소")]), OK_TEXTS) is None
+    assert MarkAny._find_button(_Win([_Named("Button", "&예")]), OK_TEXTS) is not None
 
     address = _Ctrl("Edit", 41477)
     filename = _Ctrl("Edit", 1001)
