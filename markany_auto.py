@@ -77,6 +77,14 @@ def chunks(seq, n):
         yield seq[i:i + n]
 
 
+def group_by_folder(files: list[Path]) -> dict[Path, list[Path]]:
+    """파일선택 대화상자는 폴더 단위로 다중 선택하므로 원본 폴더별로 묶는다."""
+    out: dict[Path, list[Path]] = {}
+    for f in files:
+        out.setdefault(f.parent, []).append(f)
+    return out
+
+
 # --------------------------------------------------------------------------
 # 자동화
 # --------------------------------------------------------------------------
@@ -236,24 +244,69 @@ class MarkAny:
         dlg.child_window(control_id=1).click_input()  # 열기 / 저장(S)
         time.sleep(0.5)
 
+    @staticmethod
+    def _wait_dialog_closed(dlg, timeout=15.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if not dlg.exists():
+                return True
+            time.sleep(0.3)
+        return False
+
+    # ---- 파일첨부 --------------------------------------------------------
+    def _attach_from_folder(self, req, lv, folder: Path, files: list[Path]) -> int:
+        """대화상자를 원본 폴더로 옮긴 뒤 그 폴더의 파일들을 골라 첨부한다.
+
+        파일명 칸에 폴더 경로를 넣고 열면 그 폴더로 이동하고, 이어서 따옴표로
+        묶은 파일명들을 넣으면 한 번에 선택된다. 첨부된 개수를 돌려준다.
+        """
+        before = lv.item_count()
+        self._click(req, ID_REQ_ATTACH, "파일첨부")
+        _, dlg = self._wait_file_dialog()
+
+        self._fill_file_dialog(dlg, str(folder))          # 폴더로 이동
+        names = " ".join(f'"{f.name}"' for f in files)    # 그 폴더 안에서 선택
+        self._fill_file_dialog(dlg, names)
+
+        if not self._wait_dialog_closed(dlg):
+            # 다중 선택을 막는 대화상자면 "파일을 찾을 수 없습니다" 류가 뜬다.
+            self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=2)
+            if dlg.exists():
+                dlg.child_window(control_id=2).click_input()  # 취소
+                time.sleep(0.5)
+            return 0
+        return lv.item_count() - before
+
+    def _attach_all(self, req, files: list[Path]):
+        lv = req.child_window(control_id=ID_REQ_FILELIST,
+                              class_name="SysListView32").wrapper_object()
+        for folder, group in group_by_folder(files).items():
+            added = self._attach_from_folder(req, lv, folder, group)
+            if added == len(group):
+                log.info("첨부 %d개: %s", added, folder)
+                continue
+            if added:
+                raise RuntimeError(
+                    f"{folder} 에서 {len(group)}개 중 {added}개만 첨부되었습니다."
+                )
+            # ponytail: 다중 선택을 안 받는 대화상자면 한 개씩. 느리지만 확실하다.
+            log.warning("다중 선택이 안 되어 한 개씩 첨부합니다: %s", folder)
+            for f in group:
+                if self._attach_from_folder(req, lv, folder, [f]) != 1:
+                    raise RuntimeError(f"첨부 실패: {f}")
+                log.info("첨부: %s", f.name)
+
+        got = lv.item_count()
+        if got != len(files):
+            raise RuntimeError(f"첨부 개수 불일치: 기대 {len(files)}, 실제 {got}")
+
     # ---- 1) 반출 신청 -----------------------------------------------------
     def request_batch(self, files: list[Path], subject: str, reason: str):
         self.main.set_focus()
         self._click(self.main, ID_MAIN_REQUEST, "반출 신청")
         req = self._wait(title=REQ_TITLE, timeout=20)
 
-        # ponytail: 파일첨부는 한 번에 한 개씩. 여러 폴더에 흩어진 파일을
-        # 표준 다중선택 대화상자에 한 줄로 넣는 건 같은 폴더일 때만 통한다.
-        for i, f in enumerate(files, 1):
-            self._click(req, ID_REQ_ATTACH, "파일첨부")
-            _, dlg = self._wait_file_dialog()
-            self._fill_file_dialog(dlg, str(f))
-            log.info("첨부 %d/%d: %s", i, len(files), f.name)
-
-        lv = req.child_window(control_id=ID_REQ_FILELIST, class_name="SysListView32").wrapper_object()
-        got = lv.item_count()
-        if got != len(files):
-            raise RuntimeError(f"첨부 개수 불일치: 기대 {len(files)}, 실제 {got}")
+        self._attach_all(req, files)
 
         self._set_text(req, ID_REQ_SUBJECT, subject, "제목")
         self._select_combo(req, ID_REQ_PREPOST, "사후", "사전/사후")
@@ -514,6 +567,12 @@ def selftest():
         # 폴더와 그 안의 파일을 같이 넣어도 중복되지 않는다
         got = collect_files([root, root / "a.pdf"])
         assert len(got) == 2, got
+
+        # 첨부는 원본 폴더별로 묶여야 대화상자에서 한 번에 선택할 수 있다
+        groups = group_by_folder(collect_files([root]))
+        assert list(groups) == [root, root / "sub"], list(groups)
+        assert [f.name for f in groups[root]] == ["a.pdf"]
+        assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
     print("selftest: ok")
 
 
