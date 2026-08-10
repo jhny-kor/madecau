@@ -42,9 +42,6 @@ ID_REQ_SUBMIT = 1037        # 신청 버튼
 DETAIL_TITLE_RE = r"문서반출.*"
 ID_DETAIL_DOWNLOAD = 1057   # 파일다운 버튼
 
-# 우리가 여는 창들. 메시지박스 청소 대상에서 뺀다.
-KNOWN_TITLES = (MAIN_TITLE, REQ_TITLE, "문서반출")
-
 # 열기/저장 대화상자 제목. 구조로도 판별하므로 목록에 없어도 동작한다.
 FILE_DIALOG_TITLES = ("열기", "Open", "다른 이름으로 저장", "Save",
                       "파일 선택", "폴더", "Folder", "찾아보기", "Browse")
@@ -135,6 +132,9 @@ class MarkAny:
         self.app = Application(backend="win32").connect(title=MAIN_TITLE, timeout=15)
         self.main = self.app.window(title=MAIN_TITLE)
         self.main.wait("visible ready", timeout=15)
+        # 우리가 여는 창들. 팝업 청소 대상에서 뺀다. 제목으로 거르면 확인
+        # 메시지박스가 상세 창과 제목이 같아("문서반출") 같이 걸러진다.
+        self._own = {self.main.wrapper_object().handle}
 
     # ---- 공용 헬퍼 -------------------------------------------------------
     def _win(self, **kw):
@@ -178,45 +178,58 @@ class MarkAny:
                 if kw in title:
                     raise Aborted(f"사람이 처리해야 하는 화면입니다: {title!r}")
 
-    def _dismiss_messageboxes(self, seconds=3.0, hard_limit=30.0):
-        """신청 확인/완료 같은 작은 메시지박스를 확인 버튼으로 닫는다.
+    def _handle_popups(self, tries: dict) -> bool:
+        """확인/예만 누르면 되는 팝업을 한 번 처리한다. 눌렀으면 True.
 
-        같은 창을 두 번 눌러도 안 닫히면 더 누르지 않는다. 예전에는 눌릴
-        때마다 마감 시각을 늘려서, 안 닫히는 창 하나에 영원히 매달렸다.
+        신청 확인, 덮어쓰기 확인, "이하 동일 파일에 적용", 다운로드 완료 알림이
+        모두 여기로 온다. 같은 창은 두 번까지만 시도해서, 안 닫히는 창 하나에
+        영원히 매달리지 않는다.
         """
+        for title, w in self._visible_dialogs():
+            if w.handle in self._own or tries.get(w.handle, 0) >= 2:
+                continue
+            apply_all = self._find_by_text(w, APPLY_ALL_TEXT)
+            if apply_all is not None:
+                log.info("'이하 동일 파일에 적용' 체크")
+                apply_all.click_input()
+                time.sleep(0.2)
+            btn = self._find_button(w, OK_TEXTS)
+            if btn is None:
+                if apply_all is not None:
+                    log.warning("%r 팝업에서 확인 버튼을 못 찾았습니다.", title)
+                continue
+            log.info("팝업 확인: %r", title)
+            btn.click_input()
+            tries[w.handle] = tries.get(w.handle, 0) + 1
+            time.sleep(0.5)
+            if self._alive(w):
+                log.warning("%r 창이 닫히지 않았습니다 (%d회).", title, tries[w.handle])
+            return True
+        return False
+
+    def _dismiss_messageboxes(self, seconds=3.0, hard_limit=30.0):
+        """더 뜰 게 없을 때까지 팝업을 닫는다."""
         deadline = time.time() + seconds
         hard_end = time.time() + hard_limit
         tries: dict[int, int] = {}
         while time.time() < deadline and time.time() < hard_end:
             self._guard()
-            for title, w in self._visible_dialogs():
-                if any(k in title for k in KNOWN_TITLES):
-                    continue
-                if tries.get(w.handle, 0) >= 2:
-                    continue
-                btn = self._find_button(w, OK_TEXTS)
-                if btn is None:
-                    continue
-                log.info("메시지박스 닫기: %r", title)
-                btn.click_input()
-                tries[w.handle] = tries.get(w.handle, 0) + 1
-                time.sleep(0.5)
-                if self._alive(w):
-                    log.warning("%r 창이 닫히지 않았습니다 (%d회).", title, tries[w.handle])
-                else:
-                    deadline = time.time() + seconds  # 실제로 닫혔을 때만 연장
-                break
-            time.sleep(0.3)
+            if self._handle_popups(tries):
+                deadline = time.time() + seconds
+            else:
+                time.sleep(0.3)
 
     @staticmethod
     def _find_button(win, texts):
-        """텍스트가 일치하는 버튼. 진짜 Button 을 우선한다.
+        """텍스트가 일치하는 버튼. Button > CheckBox/Pane > Static 순.
 
-        Static 라벨을 눌러봐야 아무 일도 안 일어난다. 예전에는 그걸 눌러놓고
-        닫혔다고 여겨 같은 창을 계속 두드렸다.
+        이 앱은 버튼을 오너 드로우로 만들어서 pywinauto 가 CheckBox 로 부르는
+        경우가 있고, 라벨(Static)로만 그려진 것도 있다. Static 을 누르면 보통
+        아무 일도 안 일어나므로 마지막에만 쓴다.
         """
         wanted = {x.replace("&", "") for x in texts}
-        loose = None
+        rank = {"Button": 0, "CheckBox": 1, "Pane": 1, "Static": 2}
+        best, best_rank = None, 99
         for c in win.descendants():
             try:
                 t = (c.window_text() or "").strip().replace("&", "")
@@ -225,11 +238,12 @@ class MarkAny:
                 continue
             if t not in wanted:
                 continue
-            if cls == "Button":
-                return c
-            if loose is None and cls in ("CheckBox", "Pane"):
-                loose = c
-        return loose
+            r = rank.get(cls, 99)
+            if r < best_rank:
+                best, best_rank = c, r
+                if r == 0:
+                    break
+        return best
 
     @staticmethod
     def _find_by_text(win, needle):
@@ -517,6 +531,8 @@ class MarkAny:
         self.main.set_focus()
         self._click(self.main, ID_MAIN_REQUEST, "반출 신청")
         req = self._wait(title=REQ_TITLE, timeout=20)
+        req_handle = req.wrapper_object().handle
+        self._own.add(req_handle)
 
         self._attach_all(req, files)
 
@@ -525,8 +541,9 @@ class MarkAny:
         self._set_text(req, ID_REQ_REASON, reason, "사유")
 
         self._click(req, ID_REQ_SUBMIT, "신청")
-        self._dismiss_messageboxes(seconds=4)
+        self._dismiss_messageboxes(seconds=4)  # "신청하시겠습니까?" / 완료 알림
         req.wait_not("visible", timeout=30)
+        self._own.discard(req_handle)
         log.info("신청 완료 (%d개)", len(files))
 
     # ---- 2) 최신 건 열어서 다운로드 ----------------------------------------
@@ -543,14 +560,18 @@ class MarkAny:
         log.info("최신 신청건 열기")
 
         detail = self._wait(title_re=DETAIL_TITLE_RE, timeout=20)
-        self._click(detail, ID_DETAIL_DOWNLOAD, "파일다운")
-        self._download_pump(dest)
+        detail_handle = detail.wrapper_object().handle
+        self._own.add(detail_handle)
 
-        # 원본 파일명 그대로 저장됐는지 실제 파일로 확인한다.
-        # 복호화에 시간이 걸리므로 파일이 나타날 때까지 기다린다.
+        self._click(detail, ID_DETAIL_DOWNLOAD, "파일다운")
+        tries = self._download_pump(dest)
+
+        # 원본 파일명 그대로 저장됐는지 실제 파일로 확인한다. 복호화에 시간이
+        # 걸리고, 그 사이 "다운로드가 완료되었습니다" 알림이 뜨면 확인을 누른다.
         end = time.time() + 180
         while True:
             self._guard()
+            self._handle_popups(tries)
             missing = [f.name for f in files if not (dest / f.name).exists()]
             if not missing or time.time() > end:
                 break
@@ -559,42 +580,31 @@ class MarkAny:
             raise RuntimeError(
                 f"{len(missing)}개가 원본 파일명으로 저장되지 않았습니다: {missing[:3]}"
             )
-        # 배치마다 닫는다. 남겨두면 다음 배치가 이 창을 최신 건으로 착각한다.
+        # 남은 완료 알림을 닫고 상세 창도 닫는다. 남겨두면 다음 배치가
+        # 이 창을 최신 건으로 착각한다.
+        self._dismiss_messageboxes(seconds=2)
         try:
             detail.close()
             time.sleep(0.5)
         except Exception as e:  # noqa: BLE001
             log.warning("문서반출 창을 닫지 못했습니다: %s", e)
+        self._own.discard(detail_handle)
 
         log.info("다운로드 %d개 저장: %s", len(files), dest)
         return len(files)
 
     def _download_pump(self, dest: Path, idle_timeout=15.0):
-        """폴더 선택 / 저장 대화상자 / '이하 동일 파일에 적용' 팝업을 처리한다."""
+        """폴더 선택 / 저장 대화상자와 그 사이 팝업을 더 안 뜰 때까지 처리한다.
+
+        눌러본 팝업 기록을 돌려준다. 다운로드가 끝날 때까지 계속 쓰인다.
+        """
         dest.mkdir(parents=True, exist_ok=True)
+        tries: dict[int, int] = {}
         saved = 0
         last = time.time()
         while time.time() - last < idle_timeout:
             self._guard()
-            handled = False
-            for title, w in self._visible_dialogs():
-                # 덮어쓰기 확인이 저장 대화상자보다 먼저
-                yes = self._find_button(w, ("예", "&예", "&Yes"))
-                if yes is not None and "확인" in title:
-                    yes.click_input()
-                    handled = True
-                    break
-                apply_all = self._find_by_text(w, APPLY_ALL_TEXT)
-                if apply_all is not None:
-                    log.info("'이하 동일 파일에 적용' 체크 후 확인")
-                    apply_all.click_input()
-                    time.sleep(0.2)
-                    ok = self._find_button(w, OK_TEXTS)
-                    if ok is None:
-                        raise NeedsCapture(f"{title!r} 팝업에서 확인 버튼을 못 찾았습니다.")
-                    ok.click_input()
-                    handled = True
-                    break
+            handled = self._handle_popups(tries)
             if not handled:
                 found = self._find_file_dialog()
                 if found:
@@ -620,7 +630,7 @@ class MarkAny:
                 last = time.time()
             else:
                 time.sleep(0.4)
-        return saved
+        return tries
 
     # ---- 전체 실행 -------------------------------------------------------
     def run(self, files: list[Path], dest: Path, subject: str, reason: str):
@@ -898,7 +908,11 @@ def selftest():
     button = _Named("Button", "확인")
     assert MarkAny._find_button(_Win([label, button]), OK_TEXTS) is button
     assert MarkAny._find_button(_Win([button, label]), OK_TEXTS) is button
-    assert MarkAny._find_button(_Win([label]), OK_TEXTS) is None  # 라벨뿐이면 포기
+    # 오너 드로우 버튼은 pywinauto 가 CheckBox 로 부른다. Button 다음 순위.
+    owner_drawn = _Named("CheckBox", "확인")
+    assert MarkAny._find_button(_Win([label, owner_drawn]), OK_TEXTS) is owner_drawn
+    assert MarkAny._find_button(_Win([owner_drawn, button]), OK_TEXTS) is button
+    assert MarkAny._find_button(_Win([label]), OK_TEXTS) is label  # 최후 수단
     assert MarkAny._find_button(_Win([_Named("Button", "취소")]), OK_TEXTS) is None
     assert MarkAny._find_button(_Win([_Named("Button", "&예")]), OK_TEXTS) is not None
 
