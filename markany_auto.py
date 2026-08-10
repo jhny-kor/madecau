@@ -33,6 +33,7 @@ ID_MAIN_LIST = 1002         # 신청 목록 SysListView32
 REQ_TITLE = "반출 신청"
 ID_REQ_SUBJECT = 1036       # 제목 Edit
 ID_REQ_PREPOST = 1031       # 사전/사후 콤보
+PREPOST_INDEX = 1           # 0-based. 사전=0, 사후=1
 ID_REQ_REASON = 1034        # 사유 Edit
 ID_REQ_ATTACH = 1048        # 파일첨부 버튼
 ID_REQ_FILELIST = 1047      # 첨부 목록 SysListView32
@@ -43,16 +44,12 @@ ID_DETAIL_DOWNLOAD = 1057   # 파일다운 버튼
 
 # 열기/저장 대화상자 제목. 구조로도 판별하므로 목록에 없어도 동작한다.
 FILE_DIALOG_TITLES = ("열기", "Open", "다른 이름으로 저장", "Save",
-                      "파일 선택", "찾아보기", "Browse")
+                      "파일 선택", "폴더", "Folder", "찾아보기", "Browse")
 APPLY_ALL_TEXT = "이하 동일"  # "이하 동일 파일에 적용" 체크박스
 OK_TEXTS = ("확인", "예", "&예", "OK", "&Yes")
 
 # 자동 중단 키워드 (README: 승인/OTP/관리자 화면은 건드리지 않는다)
 ABORT_KEYWORDS = ("OTP", "관리자 권한", "본인 인증", "인증서")
-
-# 사전/사후 콤보 드롭다운 구조를 못 찾을 때의 키보드 대체 입력.
-# 드롭다운을 연 상태로 Capture-MarkAnyUi.ps1 을 돌려 구조를 확인하는 편이 안전하다.
-COMBO_FALLBACK_KEYS: str | None = None  # 예: "{DOWN}{ENTER}"
 
 log = logging.getLogger("markany")
 
@@ -213,43 +210,40 @@ class MarkAny:
         return None
 
     # ---- 콤보 -----------------------------------------------------------
-    def _select_combo(self, parent, control_id, value, name=""):
-        """커스텀 드로우 콤보(class=Button)에서 항목을 고른다."""
+    def _select_combo(self, parent, control_id, index, name=""):
+        """커스텀 드로우 콤보(class=Button)에서 index번째(0-based) 항목을 고른다.
+
+        항목 텍스트로 찾을 수 없다. 리스트박스 항목은 별도 HWND 가 아니어서
+        자식으로 잡히지 않고, 텍스트로 뒤지면 콤보 버튼 자신의 캡션
+        ("사전/사후 콤보")이 먼저 걸려 엉뚱한 곳을 누른다. 그래서 진짜 리스트가
+        보이면 인덱스로 고르고, 아니면 사용자가 하듯 키보드로 내려간다.
+        """
         from pywinauto import Desktop
+        from pywinauto.keyboard import send_keys
 
         before = {w.handle for _, w in self._visible_dialogs()}
         self._click(parent, control_id, name)
         time.sleep(0.5)
 
-        candidates = []
-        for w in Desktop(backend="win32").windows(class_name="ComboLBox", visible_only=True):
-            candidates.append(w)
-        for _, w in self._visible_dialogs():
-            if w.handle not in before:
-                candidates.append(w)
-        candidates.append(parent)
-
-        for cand in candidates:
+        for w in Desktop(backend="win32").windows(visible_only=True, top_level_only=True):
             try:
-                item = self._find_by_text(cand, value)
-            except Exception:
-                continue
-            if item is not None:
-                item.click_input()
-                log.info("선택: %s = %s", name or control_id, value)
+                if w.class_name() not in ("ComboLBox", "ListBox") or w.handle in before:
+                    continue
+                texts = w.item_texts()
+                w.select(index)
+                log.info("선택: %s = %r (%d번째)", name or control_id,
+                         texts[index] if index < len(texts) else "?", index + 1)
                 time.sleep(0.3)
                 return
+            except Exception as e:  # noqa: BLE001
+                log.warning("리스트 선택 실패(%s), 키보드로 시도합니다.", e)
+                break
 
-        if COMBO_FALLBACK_KEYS:
-            from pywinauto.keyboard import send_keys
-            log.warning("드롭다운을 못 찾아 키보드 대체 입력 사용: %s", COMBO_FALLBACK_KEYS)
-            send_keys(COMBO_FALLBACK_KEYS)
-            return
-
-        raise NeedsCapture(
-            f"{name or control_id} 드롭다운에서 {value!r} 항목을 찾지 못했습니다.\n"
-            "드롭다운을 연 상태로 Capture-MarkAnyUi.ps1 을 실행해 JSON을 남겨주세요."
-        )
+        # ponytail: 값을 되읽을 방법이 없다(콤보 캡션은 항상 "사전/사후 콤보").
+        # 첫 항목으로 올린 뒤 index만큼 내려가므로 현재 값과 무관하게 결정적이다.
+        send_keys("{HOME}" + "{DOWN}" * index + "{ENTER}")
+        log.info("선택: %s = %d번째 항목", name or control_id, index + 1)
+        time.sleep(0.3)
 
     # ---- 파일 선택 대화상자 -----------------------------------------------
     @staticmethod
@@ -450,7 +444,7 @@ class MarkAny:
         self._attach_all(req, files)
 
         self._set_text(req, ID_REQ_SUBJECT, subject, "제목")
-        self._select_combo(req, ID_REQ_PREPOST, "사후", "사전/사후")
+        self._select_combo(req, ID_REQ_PREPOST, PREPOST_INDEX, "사전/사후")
         self._set_text(req, ID_REQ_REASON, reason, "사유")
 
         self._click(req, ID_REQ_SUBMIT, "신청")
@@ -459,7 +453,7 @@ class MarkAny:
         log.info("신청 완료 (%d개)", len(files))
 
     # ---- 2) 최신 건 열어서 다운로드 ----------------------------------------
-    def download_latest(self, dest: Path, expect: int):
+    def download_latest(self, dest: Path, files: list[Path]):
         self.main.set_focus()
         self._click(self.main, ID_MAIN_SEARCH, "검색")
         time.sleep(1.5)
@@ -473,16 +467,29 @@ class MarkAny:
 
         detail = self._wait(title_re=DETAIL_TITLE_RE, timeout=20)
         self._click(detail, ID_DETAIL_DOWNLOAD, "파일다운")
-        saved = self._download_pump(dest, expect)
-        log.info("다운로드 %d개 저장: %s", saved, dest)
-        return saved
+        self._download_pump(dest)
 
-    def _download_pump(self, dest: Path, expect: int, idle_timeout=12.0):
-        """저장 대화상자 / '이하 동일 파일에 적용' 팝업이 더 안 뜰 때까지 처리."""
+        # 원본 파일명 그대로 저장됐는지 실제 파일로 확인한다.
+        # 복호화에 시간이 걸리므로 파일이 나타날 때까지 기다린다.
+        end = time.time() + 180
+        while True:
+            missing = [f.name for f in files if not (dest / f.name).exists()]
+            if not missing or time.time() > end:
+                break
+            time.sleep(1.0)
+        if missing:
+            raise RuntimeError(
+                f"{len(missing)}개가 원본 파일명으로 저장되지 않았습니다: {missing[:3]}"
+            )
+        log.info("다운로드 %d개 저장: %s", len(files), dest)
+        return len(files)
+
+    def _download_pump(self, dest: Path, idle_timeout=15.0):
+        """폴더 선택 / 저장 대화상자 / '이하 동일 파일에 적용' 팝업을 처리한다."""
         dest.mkdir(parents=True, exist_ok=True)
         saved = 0
         last = time.time()
-        while time.time() - last < idle_timeout and saved < expect:
+        while time.time() - last < idle_timeout:
             self._guard()
             handled = False
             for title, w in self._visible_dialogs():
@@ -506,22 +513,23 @@ class MarkAny:
             if not handled:
                 found = self._find_file_dialog()
                 if found:
-                    _, dlg = found
-                    # 저장 대화상자에 미리 채워진 원본 파일명을 그대로 쓴다.
+                    title, dlg = found
                     edits, _ = self._scan(dlg)
                     edit = self._filename_edit(edits)
-                    original = (edit.window_text() if edit else "") or ""
-                    if not original:
-                        raise NeedsCapture(
-                            "저장 대화상자에서 원본 파일명을 읽지 못했습니다."
-                        )
-                    name = Path(original).name
-                    if not self._fill_file_dialog(dlg, str(dest / name)):
-                        raise RuntimeError(
-                            f"저장 경로가 너무 깁니다: {dest / name}"
-                        )
+                    original = ((edit.window_text() if edit else "") or "").strip()
+                    if original:
+                        # "다른 이름으로 저장": 미리 채워진 원본 파일명을 유지한다.
+                        target = str(dest / Path(original).name)
+                        what = Path(original).name
+                    else:
+                        # "다운로드 할 폴더를 선택해 주세요": 폴더만 지정하면
+                        # 프로그램이 원본 파일명 그대로 저장한다.
+                        target = str(dest)
+                        what = f"{title} -> {dest}"
+                    if not self._fill_file_dialog(dlg, target):
+                        raise RuntimeError(f"경로가 너무 깁니다: {target}")
                     saved += 1
-                    log.info("저장 %d: %s", saved, name)
+                    log.info("저장 %d: %s", saved, what)
                     handled = True
             if handled:
                 last = time.time()
@@ -536,7 +544,7 @@ class MarkAny:
         for n, batch in enumerate(chunks(files, BATCH_SIZE), 1):
             log.info("=== 배치 %d (%d개) ===", n, len(batch))
             self.request_batch(batch, subject, reason)
-            done += self.download_latest(dest, expect=len(batch))
+            done += self.download_latest(dest, batch)
         log.info("끝. 요청 %d개 / 저장 %d개", total, done)
         return done
 
