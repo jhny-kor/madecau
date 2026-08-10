@@ -20,6 +20,10 @@ from pathlib import Path
 
 BATCH_SIZE = 15  # 반출 신청 팝업의 "(개수 : 15 / 사이즈 : 무제한)"
 
+# ponytail: 파일명 칸은 MAX_PATH(260자) 근처에서 입력을 잘라낸다. 여유를 두고
+# 나눠 넣고, 실제로 잘렸는지는 입력 후 읽어서 확인한다.
+NAME_FIELD_LIMIT = 250
+
 # captures/*.json 에서 읽은 컨트롤 ID
 MAIN_TITLE = "MADRMAgent"
 ID_MAIN_REQUEST = 1014      # 반출 신청 버튼
@@ -84,6 +88,31 @@ def group_by_folder(files: list[Path]) -> dict[Path, list[Path]]:
     out: dict[Path, list[Path]] = {}
     for f in files:
         out.setdefault(f.parent, []).append(f)
+    return out
+
+
+def quoted_names(files: list[Path]) -> str:
+    """파일명 칸에 넣을 문자열. 한 개면 따옴표 없이 이름만."""
+    if len(files) == 1:
+        return files[0].name
+    return " ".join(f'"{f.name}"' for f in files)
+
+
+def pack_names(files: list[Path], limit: int = NAME_FIELD_LIMIT) -> list[list[Path]]:
+    """파일명 칸 길이 제한에 맞춰 파일을 나눈다.
+
+    제한을 넘기면 대화상자가 이름을 잘라버리고 "파일 이름이 올바르지 않습니다"
+    를 띄운다. 잘리기 전에 나눠서 여러 번 첨부한다.
+    """
+    out: list[list[Path]] = []
+    current: list[Path] = []
+    for f in files:
+        if current and len(quoted_names(current + [f])) > limit:
+            out.append(current)
+            current = []
+        current.append(f)
+    if current:
+        out.append(current)
     return out
 
 
@@ -327,7 +356,8 @@ class MarkAny:
                 continue
         return ", ".join(rows) or "(없음)"
 
-    def _fill_file_dialog(self, dlg, text: str):
+    def _fill_file_dialog(self, dlg, text: str) -> bool:
+        """파일명 칸에 넣고 확인 버튼을 누른다. 입력이 잘리면 누르지 않고 False."""
         edits, _ = self._scan(dlg)
         edit = self._filename_edit(edits)
         btn = self._button(dlg, 1)  # 열기(O) / 저장(S)
@@ -335,8 +365,21 @@ class MarkAny:
             raise NeedsCapture("파일 대화상자에서 파일명 칸이나 확인 버튼을 찾지 못했습니다.")
         edit.set_edit_text(text)
         time.sleep(0.2)
+        got = edit.window_text()
+        if got != text:
+            # 그대로 누르면 "파일 이름이 올바르지 않습니다" 가 뜬다.
+            log.warning("파일명 칸이 %d/%d자로 잘렸습니다.", len(got), len(text))
+            return False
         btn.click_input()
         time.sleep(0.6)
+        return True
+
+    def _cancel_dialog(self, dlg):
+        self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=2)
+        cancel = self._button(dlg, 2)
+        if cancel is not None:
+            cancel.click_input()
+            time.sleep(0.5)
 
     @staticmethod
     def _wait_dialog_closed(dlg, timeout=15.0):
@@ -354,24 +397,23 @@ class MarkAny:
     def _attach_from_folder(self, req, lv, folder: Path, files: list[Path]) -> int:
         """대화상자를 원본 폴더로 옮긴 뒤 그 폴더의 파일들을 골라 첨부한다.
 
-        파일명 칸에 폴더 경로를 넣고 열면 그 폴더로 이동하고, 이어서 따옴표로
-        묶은 파일명들을 넣으면 한 번에 선택된다. 첨부된 개수를 돌려준다.
+        파일명 칸에 폴더 경로를 넣고 열면 그 폴더로 이동하고, 이어서 파일명들을
+        넣으면 한 번에 선택된다. 첨부된 개수를 돌려준다.
         """
         before = lv.item_count()
         self._click(req, ID_REQ_ATTACH, "파일첨부")
         _, dlg = self._wait_file_dialog()
 
-        self._fill_file_dialog(dlg, str(folder))          # 폴더로 이동
-        names = " ".join(f'"{f.name}"' for f in files)    # 그 폴더 안에서 선택
-        self._fill_file_dialog(dlg, names)
+        if not self._fill_file_dialog(dlg, str(folder)):      # 폴더로 이동
+            self._cancel_dialog(dlg)
+            return 0
+        if not self._fill_file_dialog(dlg, quoted_names(files)):  # 그 안에서 선택
+            self._cancel_dialog(dlg)
+            return 0
 
         if not self._wait_dialog_closed(dlg):
             # 다중 선택을 막는 대화상자면 "파일을 찾을 수 없습니다" 류가 뜬다.
-            self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=2)
-            cancel = self._button(dlg, 2)
-            if cancel is not None:
-                cancel.click_input()
-                time.sleep(0.5)
+            self._cancel_dialog(dlg)
             return 0
         return lv.item_count() - before
 
@@ -379,20 +421,21 @@ class MarkAny:
         lv = req.child_window(control_id=ID_REQ_FILELIST,
                               class_name="SysListView32").wrapper_object()
         for folder, group in group_by_folder(files).items():
-            added = self._attach_from_folder(req, lv, folder, group)
-            if added == len(group):
-                log.info("첨부 %d개: %s", added, folder)
-                continue
-            if added:
-                raise RuntimeError(
-                    f"{folder} 에서 {len(group)}개 중 {added}개만 첨부되었습니다."
-                )
-            # ponytail: 다중 선택을 안 받는 대화상자면 한 개씩. 느리지만 확실하다.
-            log.warning("다중 선택이 안 되어 한 개씩 첨부합니다: %s", folder)
-            for f in group:
-                if self._attach_from_folder(req, lv, folder, [f]) != 1:
-                    raise RuntimeError(f"첨부 실패: {f}")
-                log.info("첨부: %s", f.name)
+            for part in pack_names(group):
+                added = self._attach_from_folder(req, lv, folder, part)
+                if added == len(part):
+                    log.info("첨부 %d개: %s", added, folder)
+                    continue
+                if added:
+                    raise RuntimeError(
+                        f"{folder} 에서 {len(part)}개 중 {added}개만 첨부되었습니다."
+                    )
+                # ponytail: 다중 선택을 안 받는 대화상자면 한 개씩. 느리지만 확실하다.
+                log.warning("다중 선택이 안 되어 한 개씩 첨부합니다: %s", folder)
+                for f in part:
+                    if self._attach_from_folder(req, lv, folder, [f]) != 1:
+                        raise RuntimeError(f"첨부 실패: {f}")
+                    log.info("첨부: %s", f.name)
 
         got = lv.item_count()
         if got != len(files):
@@ -464,11 +507,19 @@ class MarkAny:
                 found = self._find_file_dialog()
                 if found:
                     _, dlg = found
+                    # 저장 대화상자에 미리 채워진 원본 파일명을 그대로 쓴다.
                     edits, _ = self._scan(dlg)
                     edit = self._filename_edit(edits)
-                    name = Path((edit.window_text() if edit else "") or
-                                f"file_{saved + 1}").name
-                    self._fill_file_dialog(dlg, str(dest / name))
+                    original = (edit.window_text() if edit else "") or ""
+                    if not original:
+                        raise NeedsCapture(
+                            "저장 대화상자에서 원본 파일명을 읽지 못했습니다."
+                        )
+                    name = Path(original).name
+                    if not self._fill_file_dialog(dlg, str(dest / name)):
+                        raise RuntimeError(
+                            f"저장 경로가 너무 깁니다: {dest / name}"
+                        )
                     saved += 1
                     log.info("저장 %d: %s", saved, name)
                     handled = True
@@ -708,6 +759,20 @@ def selftest():
     assert MarkAny._button(dlg, 99) is None
     # 주소 표시줄이 숨어 있어도 결과는 같다
     assert MarkAny._filename_edit([_Ctrl("Edit", 41477, visible=False), filename]) is filename
+
+    # 파일명 칸 길이 제한. 넘기면 이름이 잘려 "파일 이름이 올바르지 않습니다" 가 뜬다.
+    long_names = [Path(f"D:/원본/{'가' * 40}_{i}.hwp") for i in range(8)]
+    parts = pack_names(long_names, limit=250)
+    assert sum(len(p) for p in parts) == 8, parts
+    assert [f for p in parts for f in p] == long_names  # 순서와 누락 없음
+    assert all(len(quoted_names(p)) <= 250 for p in parts), [len(quoted_names(p)) for p in parts]
+    assert len(parts) > 1, "제한을 넘겼는데 나뉘지 않았다"
+    # 한 개면 따옴표 없이, 여러 개면 따옴표로 감싼다
+    assert quoted_names(long_names[:1]) == long_names[0].name
+    assert quoted_names(long_names[:2]).startswith('"')
+    # 제한보다 긴 이름 하나는 혼자 담긴다 (자를 방법이 없다)
+    huge = [Path("D:/원본/" + "나" * 300 + ".hwp")]
+    assert pack_names(huge, limit=250) == [huge]
 
     print("selftest: ok")
 
