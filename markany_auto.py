@@ -210,40 +210,85 @@ class MarkAny:
         return None
 
     # ---- 콤보 -----------------------------------------------------------
+    @staticmethod
+    def _alive(win):
+        try:
+            return bool(win.is_visible())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _toplevel():
+        from pywinauto import Desktop
+
+        out = set()
+        for w in Desktop(backend="win32").windows(visible_only=True, top_level_only=True):
+            try:
+                out.add((w.handle, w.class_name()))
+            except Exception:
+                continue
+        return out
+
     def _select_combo(self, parent, control_id, index, name=""):
         """커스텀 드로우 콤보(class=Button)에서 index번째(0-based) 항목을 고른다.
 
-        항목 텍스트로 찾을 수 없다. 리스트박스 항목은 별도 HWND 가 아니어서
-        자식으로 잡히지 않고, 텍스트로 뒤지면 콤보 버튼 자신의 캡션
-        ("사전/사후 콤보")이 먼저 걸려 엉뚱한 곳을 누른다. 그래서 진짜 리스트가
-        보이면 인덱스로 고르고, 아니면 사용자가 하듯 키보드로 내려간다.
+        항목 텍스트로는 찾을 수 없다. 리스트 항목은 별도 HWND 가 아니고,
+        텍스트로 뒤지면 콤보 버튼 자신의 캡션("사전/사후 콤보")이 먼저 걸린다.
+        그래서 드롭다운이 실제로 뜬 자리를 좌표로 짚어 어떤 창인지 확인한 뒤,
+        그 안에서 index번째 줄을 누른다. 사람이 하는 동작 그대로다.
         """
         from pywinauto import Desktop
-        from pywinauto.keyboard import send_keys
 
-        before = {w.handle for _, w in self._visible_dialogs()}
-        self._click(parent, control_id, name)
+        combo = parent.child_window(control_id=control_id).wrapper_object()
+        rect = combo.rectangle()
+        before = self._toplevel()
+
+        combo.click_input()
+        log.info("클릭: %s (id=%s)", name or control_id, control_id)
+        time.sleep(0.6)
+
+        new = self._toplevel() - before
+        if new:
+            log.info("새로 뜬 창: %s", sorted(new))
+
+        # 콤보 바로 아래를 짚으면 드롭다운이 열렸는지, 무엇인지 알 수 있다.
+        probe = (rect.left + rect.width() // 2, rect.bottom + 8)
+        try:
+            drop = Desktop(backend="win32").from_point(*probe)
+        except Exception as e:  # noqa: BLE001
+            drop = None
+            log.warning("드롭다운 지점 조회 실패: %s", e)
+
+        if drop is None or drop.handle == combo.handle:
+            raise NeedsCapture(
+                f"{name or control_id} 드롭다운이 열리지 않았습니다.\n"
+                f"짚은 지점 {probe}, 새 창 {sorted(new) or '없음'}\n"
+                f"보인 창: {self._window_summary()}"
+            )
+        log.info("드롭다운: class=%r rect=%s", drop.class_name(), drop.rectangle())
+
+        # 진짜 리스트박스면 항목 사각형을 그대로 쓴다.
+        target = None
+        try:
+            log.info("드롭다운 항목: %s", drop.item_texts())
+            r = drop.item_rect(index)
+            target = (r.left + 8, (r.top + r.bottom) // 2)
+        except Exception as e:  # noqa: BLE001
+            log.info("리스트박스 API 사용 불가(%s), 줄 높이로 계산합니다.", e)
+            item_h = rect.height()
+            target = (20, item_h * index + item_h // 2)
+
+        drop.click_input(coords=target)
         time.sleep(0.5)
 
-        for w in Desktop(backend="win32").windows(visible_only=True, top_level_only=True):
-            try:
-                if w.class_name() not in ("ComboLBox", "ListBox") or w.handle in before:
-                    continue
-                texts = w.item_texts()
-                w.select(index)
-                log.info("선택: %s = %r (%d번째)", name or control_id,
-                         texts[index] if index < len(texts) else "?", index + 1)
-                time.sleep(0.3)
-                return
-            except Exception as e:  # noqa: BLE001
-                log.warning("리스트 선택 실패(%s), 키보드로 시도합니다.", e)
-                break
-
-        # ponytail: 값을 되읽을 방법이 없다(콤보 캡션은 항상 "사전/사후 콤보").
-        # 첫 항목으로 올린 뒤 index만큼 내려가므로 현재 값과 무관하게 결정적이다.
-        send_keys("{HOME}" + "{DOWN}" * index + "{ENTER}")
+        # ponytail: 콤보 캡션은 항상 "사전/사후 콤보"라 고른 값을 되읽을 수 없다.
+        # 대신 드롭다운이 닫혔는지로 클릭이 항목에 맞았는지 확인한다.
+        if self._alive(drop):
+            raise NeedsCapture(
+                f"{name or control_id} 항목을 눌렀지만 드롭다운이 닫히지 않았습니다.\n"
+                f"누른 좌표 {target} (드롭다운 {drop.rectangle()}, 콤보 {rect})"
+            )
         log.info("선택: %s = %d번째 항목", name or control_id, index + 1)
-        time.sleep(0.3)
 
     # ---- 파일 선택 대화상자 -----------------------------------------------
     @staticmethod
