@@ -140,10 +140,11 @@ class Aborted(RuntimeError):
 
 
 class MarkAny:
-    def __init__(self, stop: "threading.Event | None" = None):
+    def __init__(self, stop: "threading.Event | None" = None, background: bool = True):
         from pywinauto import Application  # Windows 전용이라 지연 import
 
         self.stop = stop
+        self.background = background
         self.app = Application(backend="win32").connect(title=MAIN_TITLE, timeout=15)
         self.main = self.app.window(title=MAIN_TITLE)
         self.main.wait("visible ready", timeout=15)
@@ -152,6 +153,24 @@ class MarkAny:
         self._own = {self.main.wrapper_object().handle}
 
     # ---- 공용 헬퍼 -------------------------------------------------------
+    def _press(self, ctrl, **kw):
+        """컨트롤을 누른다.
+
+        background=True 면 실제 마우스를 움직이지 않고 창에 클릭 메시지를
+        보낸다. 그동안 다른 일을 할 수 있고, 창이 가려져 있어도 동작한다.
+        오너 드로우 컨트롤이 메시지에 반응하지 않으면 background=False 로
+        돌려 실제 마우스를 쓴다.
+        """
+        if self.background:
+            ctrl.click(**kw)
+        else:
+            ctrl.click_input(**kw)
+
+    def _focus_main(self):
+        # 백그라운드 모드에서는 창을 앞으로 끌어오지 않는다.
+        if not self.background:
+            self.main.set_focus()
+
     def _win(self, **kw):
         return self.app.window(**kw)
 
@@ -164,7 +183,7 @@ class MarkAny:
         self._guard()
         btn = parent.child_window(control_id=control_id)
         btn.wait("visible enabled", timeout=15)
-        btn.click_input()
+        self._press(btn)
         log.info("클릭: %s (id=%s)", name or control_id, control_id)
         time.sleep(0.3)
 
@@ -206,7 +225,7 @@ class MarkAny:
             apply_all = self._find_by_text(w, APPLY_ALL_TEXT)
             if apply_all is not None:
                 log.info("'이하 동일 파일에 적용' 체크")
-                apply_all.click_input()
+                self._press(apply_all)
                 time.sleep(0.2)
             btn = self._find_button(w, OK_TEXTS)
             if btn is None:
@@ -214,7 +233,7 @@ class MarkAny:
                     log.warning("%r 팝업에서 확인 버튼을 못 찾았습니다.", title)
                 continue
             log.info("팝업 확인: %r", title)
-            btn.click_input()
+            self._press(btn)
             tries[w.handle] = tries.get(w.handle, 0) + 1
             time.sleep(0.5)
             if self._alive(w):
@@ -304,7 +323,7 @@ class MarkAny:
         rect = combo.rectangle()
         before = self._toplevel()
 
-        combo.click_input()
+        self._press(combo)
         log.info("클릭: %s (id=%s)", name or control_id, control_id)
         time.sleep(0.6)
 
@@ -339,7 +358,7 @@ class MarkAny:
             item_h = rect.height()
             target = (20, item_h * index + item_h // 2)
 
-        drop.click_input(coords=target)
+        self._press(drop, coords=target)
         time.sleep(0.5)
 
         # ponytail: 콤보 캡션은 항상 "사전/사후 콤보"라 고른 값을 되읽을 수 없다.
@@ -470,7 +489,7 @@ class MarkAny:
             # 그대로 누르면 "파일 이름이 올바르지 않습니다" 가 뜬다.
             log.warning("파일명 칸이 %d/%d자로 잘렸습니다.", len(got), len(text))
             return False
-        btn.click_input()
+        self._press(btn)
         time.sleep(0.6)
         return True
 
@@ -478,7 +497,7 @@ class MarkAny:
         self._dismiss_messageboxes(seconds=2)
         cancel = self._button(dlg, 2)
         if cancel is not None:
-            cancel.click_input()
+            self._press(cancel)
             time.sleep(0.5)
 
     @staticmethod
@@ -543,7 +562,7 @@ class MarkAny:
 
     # ---- 1) 반출 신청 -----------------------------------------------------
     def request_batch(self, files: list[Path], subject: str, reason: str):
-        self.main.set_focus()
+        self._focus_main()
         self._click(self.main, ID_MAIN_REQUEST, "반출 신청")
         req = self._wait(title=REQ_TITLE, timeout=20)
         req_handle = req.wrapper_object().handle
@@ -570,7 +589,7 @@ class MarkAny:
             return None
 
     def download_latest(self, dest: Path, files: list[Path]):
-        self.main.set_focus()
+        self._focus_main()
         self._click(self.main, ID_MAIN_SEARCH, "검색")
         time.sleep(1.5)
 
@@ -578,7 +597,7 @@ class MarkAny:
                                     class_name="SysListView32").wrapper_object()
         if lv.item_count() == 0:
             raise RuntimeError("신청 목록이 비어 있습니다.")
-        lv.get_item(0).click_input(double=True)  # 맨 위 = 최신
+        self._press(lv.get_item(0), double=True)  # 맨 위 = 최신
         log.info("최신 신청건 열기")
 
         detail = self._wait(title_re=DETAIL_TITLE_RE, timeout=20)
@@ -671,22 +690,29 @@ class MarkAny:
         return done
 
 
-def watch_stop_key(stop: threading.Event, finished: threading.Event, poll=0.1):
-    """ESC 를 누르면 중지 플래그를 세운다.
+def watch_stop_key(stop: threading.Event, finished: threading.Event,
+                   allow_escape=True, poll=0.1):
+    """Ctrl+Shift+Q(항상)와 ESC(allow_escape)로 중지 플래그를 세운다.
 
-    자동화가 마우스와 포커스를 가져가므로 GUI 창의 키 바인딩은 안 먹는다.
-    포커스와 무관하게 눌림을 읽는 GetAsyncKeyState 로 확인한다.
+    GUI 창의 키 바인딩은 안 먹는다. 포커스와 무관하게 눌림을 읽는
+    GetAsyncKeyState 로 확인한다. 백그라운드 모드에서는 사용자가 다른 일을
+    하며 ESC 를 누를 수 있으므로 ESC 는 받지 않는다.
     """
     import ctypes
 
     try:
         user32 = ctypes.windll.user32
         user32.GetAsyncKeyState.restype = ctypes.c_short
-    except AttributeError:  # 윈도우가 아니면 ESC 감시 없이 중지 버튼만
+    except AttributeError:  # 윈도우가 아니면 중지 버튼만
         return
-    VK_ESCAPE = 0x1B
+    VK_ESCAPE, VK_CONTROL, VK_SHIFT, VK_Q = 0x1B, 0x11, 0x10, 0x51
+
+    def down(vk):
+        return user32.GetAsyncKeyState(vk) & 0x8000
+
     while not stop.is_set() and not finished.is_set():
-        if user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000:
+        if (down(VK_CONTROL) and down(VK_SHIFT) and down(VK_Q)) or \
+                (allow_escape and down(VK_ESCAPE)):
             stop.set()
             return
         time.sleep(poll)
@@ -792,6 +818,10 @@ def gui():
     subject_var = tk.StringVar(value="복호화A")
     ttk.Entry(opts, textvariable=subject_var, width=60).grid(row=2, column=1, padx=4, sticky="w")
 
+    bg_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(opts, text="백그라운드 실행 (마우스를 쓰지 않음)",
+                    variable=bg_var).grid(row=3, column=1, sticky="w", pady=2)
+
     logbox = tk.Text(frm, height=14, state="disabled")
     logbox.pack(fill="both", expand=True, pady=6)
 
@@ -812,7 +842,7 @@ def gui():
     finished = threading.Event()
 
     ttk.Button(btns, text="창 구조 저장", command=save_dump).pack(side="left")
-    ttk.Label(btns, text="  진행 중 ESC 를 누르면 중지").pack(side="left")
+    ttk.Label(btns, text="  중지: Ctrl+Shift+Q").pack(side="left")
     start_btn = ttk.Button(btns, text="시작")
     start_btn.pack(side="right")
     stop_btn = ttk.Button(btns, text="중지", state="disabled")
@@ -830,9 +860,9 @@ def gui():
             logbox.configure(state="disabled")
         root.after(200, pump)
 
-    def worker(files, dest, subject):
+    def worker(files, dest, subject, background):
         try:
-            MarkAny(stop).run(files, dest, subject, subject)
+            MarkAny(stop, background=background).run(files, dest, subject, subject)
             msgs.put("완료되었습니다.")
         except Exception as e:  # noqa: BLE001
             log.error("중단: %s", e)
@@ -869,16 +899,21 @@ def gui():
         log_dir = Path(dest_var.get().strip() or Path.home())
         log_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(log_dir, GuiHandler())
+        background = bg_var.get()
         batches = make_batches(files, dest)
-        log.info("대상 %d개 파일, %d배치, 저장 위치: %s (중지: ESC)",
-                 len(files), len(batches), "원본 폴더" if to_source else dest)
+        log.info("대상 %d개 파일, %d배치, 저장 위치: %s, %s (중지: %s)",
+                 len(files), len(batches), "원본 폴더" if to_source else dest,
+                 "백그라운드" if background else "마우스 사용",
+                 "Ctrl+Shift+Q" if background else "ESC / Ctrl+Shift+Q")
         stop.clear()
         finished.clear()
         start_btn.configure(state="disabled")
         stop_btn.configure(state="normal")
-        threading.Thread(target=watch_stop_key, args=(stop, finished),
+        threading.Thread(target=watch_stop_key,
+                         args=(stop, finished, not background),
                          daemon=True).start()
-        threading.Thread(target=worker, args=(files, dest, subject_var.get()),
+        threading.Thread(target=worker,
+                         args=(files, dest, subject_var.get(), background),
                          daemon=True).start()
 
     start_btn.configure(command=start)
