@@ -37,6 +37,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-MarkAnyAuto.ps1
 
 설치 파일이 필요 없으면 `-SkipInstaller` 를 붙입니다.
 
+> `Build-MarkAnyAuto.ps1` 과 `MarkAnyAuto.iss` 는 **UTF-8 BOM**으로 저장해야 합니다.
+> BOM이 없으면 Windows PowerShell 5.1이 파일을 CP949로 읽어 한글이 깨지고, Inno Setup이 `[Setup]` 지시자를 인식하지 못합니다.
+
 ## 자동화 실행
 
 빌드한 exe를 실행하거나, 개발 중이라면 `pip install pywinauto` 후 직접 실행합니다.

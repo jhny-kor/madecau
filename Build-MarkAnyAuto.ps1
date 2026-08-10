@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Python = "python",
     [switch]$SkipInstaller,
@@ -73,38 +73,13 @@ if (-not $iscc) {
     exit 0
 }
 
-$issPath = Join-Path $root ".build\MarkAnyAuto.iss"
-$iss = @"
-[Setup]
-AppName=MarkAny 복호화 자동화
-AppVersion=1.0
-DefaultDirName={autopf}\MarkAnyAuto
-DefaultGroupName=MarkAny 복호화 자동화
-PrivilegesRequired=lowest
-OutputDir=$dist
-OutputBaseFilename=MarkAnyAuto-Setup
-Compression=lzma2
-SolidCompression=yes
-
-[Languages]
-Name: "korean"; MessagesFile: "compiler:Default.isl"
-
-[Files]
-Source: "$exe"; DestDir: "{app}"; Flags: ignoreversion
-
-[Icons]
-Name: "{group}\MarkAny 복호화 자동화"; Filename: "{app}\MarkAnyAuto.exe"
-Name: "{autodesktop}\MarkAny 복호화 자동화"; Filename: "{app}\MarkAnyAuto.exe"
-
-[Run]
-Filename: "{app}\MarkAnyAuto.exe"; Description: "지금 실행"; Flags: nowait postinstall skipifsilent
-"@
-
-# Inno Setup은 유니코드 스크립트에 BOM을 요구한다.
-[System.IO.File]::WriteAllText($issPath, $iss, (New-Object System.Text.UTF8Encoding($true)))
+# .iss 는 저장소에 그대로 둔다. PowerShell 문자열로 만들어 다시 쓰면
+# 인코딩을 한 번 더 거치면서 한글이 깨지고 지시자가 통째로 사라진다.
+$issPath = Join-Path $root "MarkAnyAuto.iss"
+if (-not (Test-Path $issPath)) { throw "설치 스크립트가 없습니다: $issPath" }
 
 Write-Output "설치 파일 빌드..."
-& $iscc.FullName $issPath
+& $iscc.FullName "/DExePath=$exe" "/O$dist" $issPath
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup 빌드에 실패했습니다." }
 
 Write-Output ""
