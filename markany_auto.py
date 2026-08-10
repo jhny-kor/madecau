@@ -37,7 +37,9 @@ ID_REQ_SUBMIT = 1037        # 신청 버튼
 DETAIL_TITLE_RE = r"문서반출.*"
 ID_DETAIL_DOWNLOAD = 1057   # 파일다운 버튼
 
-SAVE_TITLE_RE = r"다른 이름으로 저장|Save As"
+# 열기/저장 대화상자 제목. 구조로도 판별하므로 목록에 없어도 동작한다.
+FILE_DIALOG_TITLES = ("열기", "Open", "다른 이름으로 저장", "Save",
+                      "파일 선택", "찾아보기", "Browse")
 APPLY_ALL_TEXT = "이하 동일"  # "이하 동일 파일에 적용" 체크박스
 OK_TEXTS = ("확인", "예", "&예", "OK", "&Yes")
 
@@ -221,35 +223,130 @@ class MarkAny:
         )
 
     # ---- 파일 선택 대화상자 -----------------------------------------------
-    def _wait_file_dialog(self, timeout=20):
-        """열기/저장 대화상자를 찾는다 (제목이 환경마다 달라 Edit+확인버튼으로 판별)."""
+    @staticmethod
+    def _scan(win):
+        """대화상자 안의 Edit 목록과 버튼 컨트롤 ID를 한 번에 훑는다.
+
+        child_window(...).exists() 는 같은 클래스가 여러 개면
+        ElementAmbiguousError 를 던진다. 열기 대화상자에는 파일명 칸과
+        주소 표시줄 두 개의 Edit 이 있어 그대로 걸린다. 그래서 자식을
+        직접 훑는다.
+        """
+        edits, buttons = [], set()
+        for c in win.descendants():
+            try:
+                cls, cid = c.class_name(), c.control_id()
+            except Exception:
+                continue
+            if cls == "Edit":
+                edits.append(c)
+            elif cls == "Button":
+                buttons.add(cid)
+        return edits, buttons
+
+    @staticmethod
+    def _filename_edit(edits):
+        """파일명 입력 칸. 주소 표시줄 Edit 과 헷갈리지 않게 ID를 먼저 본다."""
+        visible = []
+        for e in edits:
+            try:
+                if e.is_visible():
+                    visible.append(e)
+            except Exception:
+                continue
+        pool = visible or edits
+        for cid in (1148, 1001):  # 클래식 / 모던(Vista+) 파일명 칸
+            for e in pool:
+                try:
+                    if e.control_id() == cid:
+                        return e
+                except Exception:
+                    continue
+        return pool[0] if pool else None
+
+    @staticmethod
+    def _button(win, control_id):
+        for c in win.descendants():
+            try:
+                if c.class_name() == "Button" and c.control_id() == control_id:
+                    return c
+            except Exception:
+                continue
+        return None
+
+    def _find_file_dialog(self):
+        """열기/저장 대화상자를 데스크톱 전체에서 찾는다. 없으면 None.
+
+        ESAgent 프로세스 안에서만 찾으면 대화상자를 다른 프로세스가 띄울 때
+        놓친다. 제목은 환경마다 다르므로 '파일명 Edit + 확인 버튼(id=1)'
+        구조로 판별하고, 제목까지 맞으면 우선한다.
+        """
+        from pywinauto import Desktop
+
+        fallback = None
+        for w in Desktop(backend="win32").windows(class_name="#32770",
+                                                  visible_only=True,
+                                                  top_level_only=True):
+            try:
+                title = w.window_text()
+            except Exception:
+                continue
+            if title == MAIN_TITLE or title == REQ_TITLE or title.startswith("문서반출"):
+                continue
+            edits, buttons = self._scan(w)
+            if 1 not in buttons or self._filename_edit(edits) is None:
+                continue
+            if any(k in title for k in FILE_DIALOG_TITLES):
+                return title, w
+            fallback = fallback or (title, w)
+        return fallback
+
+    def _wait_file_dialog(self, timeout=25):
         end = time.time() + timeout
         while time.time() < end:
             self._guard()
-            for title, w in self._visible_dialogs():
-                try:
-                    if w.child_window(class_name="Edit").exists(timeout=0.1) and \
-                       w.child_window(control_id=1).exists(timeout=0.1):
-                        return title, w
-                except Exception:
-                    continue
+            found = self._find_file_dialog()
+            if found:
+                log.info("파일 대화상자: %r", found[0])
+                return found
             time.sleep(0.3)
-        raise TimeoutError("파일 대화상자가 열리지 않았습니다.")
+        raise TimeoutError(
+            "파일 대화상자를 찾지 못했습니다.\n보인 창: " + self._window_summary()
+        )
 
-    def _fill_file_dialog(self, dlg, path: str):
-        edit = dlg.child_window(class_name="Edit")
-        edit.wait("visible enabled", timeout=10)
-        edit.set_edit_text(path)
+    @staticmethod
+    def _window_summary():
+        """실패했을 때 무엇이 떠 있었는지 로그에 남긴다."""
+        from pywinauto import Desktop
+
+        rows = []
+        for w in Desktop(backend="win32").windows(visible_only=True, top_level_only=True):
+            try:
+                rows.append(f"{w.window_text()!r}({w.class_name()})")
+            except Exception:
+                continue
+        return ", ".join(rows) or "(없음)"
+
+    def _fill_file_dialog(self, dlg, text: str):
+        edits, _ = self._scan(dlg)
+        edit = self._filename_edit(edits)
+        btn = self._button(dlg, 1)  # 열기(O) / 저장(S)
+        if edit is None or btn is None:
+            raise NeedsCapture("파일 대화상자에서 파일명 칸이나 확인 버튼을 찾지 못했습니다.")
+        edit.set_edit_text(text)
         time.sleep(0.2)
-        dlg.child_window(control_id=1).click_input()  # 열기 / 저장(S)
-        time.sleep(0.5)
+        btn.click_input()
+        time.sleep(0.6)
 
     @staticmethod
     def _wait_dialog_closed(dlg, timeout=15.0):
         end = time.time() + timeout
         while time.time() < end:
-            if not dlg.exists():
-                return True
+            try:
+                if not dlg.is_visible():
+                    return True
+            except Exception:
+                return True  # 창이 사라져 핸들이 무효해진 경우
             time.sleep(0.3)
         return False
 
@@ -271,8 +368,9 @@ class MarkAny:
         if not self._wait_dialog_closed(dlg):
             # 다중 선택을 막는 대화상자면 "파일을 찾을 수 없습니다" 류가 뜬다.
             self._dismiss_messageboxes({MAIN_TITLE, REQ_TITLE}, seconds=2)
-            if dlg.exists():
-                dlg.child_window(control_id=2).click_input()  # 취소
+            cancel = self._button(dlg, 2)
+            if cancel is not None:
+                cancel.click_input()
                 time.sleep(0.5)
             return 0
         return lv.item_count() - before
@@ -362,15 +460,18 @@ class MarkAny:
                     ok.click_input()
                     handled = True
                     break
-                import re
-                if re.search(SAVE_TITLE_RE, title):
-                    edit = w.child_window(class_name="Edit")
-                    name = edit.window_text() or f"file_{saved + 1}"
-                    self._fill_file_dialog(w, str(dest / Path(name).name))
+            if not handled:
+                found = self._find_file_dialog()
+                if found:
+                    _, dlg = found
+                    edits, _ = self._scan(dlg)
+                    edit = self._filename_edit(edits)
+                    name = Path((edit.window_text() if edit else "") or
+                                f"file_{saved + 1}").name
+                    self._fill_file_dialog(dlg, str(dest / name))
                     saved += 1
                     log.info("저장 %d: %s", saved, name)
                     handled = True
-                    break
             if handled:
                 last = time.time()
             else:
@@ -573,6 +674,41 @@ def selftest():
         assert list(groups) == [root, root / "sub"], list(groups)
         assert [f.name for f in groups[root]] == ["a.pdf"]
         assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
+
+    # 열기 대화상자에는 Edit 이 여러 개다. 주소 표시줄이 아니라
+    # 파일명 칸을 골라야 한다 (예전에 여기서 탐지가 통째로 실패했다).
+    class _Ctrl:
+        def __init__(self, cls, cid, visible=True):
+            self._cls, self._cid, self._vis = cls, cid, visible
+
+        def class_name(self):
+            return self._cls
+
+        def control_id(self):
+            return self._cid
+
+        def is_visible(self):
+            return self._vis
+
+    class _Win:
+        def __init__(self, children):
+            self._children = children
+
+        def descendants(self):
+            return self._children
+
+    address = _Ctrl("Edit", 41477)
+    filename = _Ctrl("Edit", 1001)
+    dlg = _Win([address, filename, _Ctrl("Button", 1), _Ctrl("Button", 2)])
+
+    edits, buttons = MarkAny._scan(dlg)
+    assert len(edits) == 2 and buttons == {1, 2}, (edits, buttons)
+    assert MarkAny._filename_edit(edits) is filename
+    assert MarkAny._button(dlg, 2) is dlg.descendants()[3]
+    assert MarkAny._button(dlg, 99) is None
+    # 주소 표시줄이 숨어 있어도 결과는 같다
+    assert MarkAny._filename_edit([_Ctrl("Edit", 41477, visible=False), filename]) is filename
+
     print("selftest: ok")
 
 
