@@ -88,6 +88,21 @@ def group_by_folder(files: list[Path]) -> dict[Path, list[Path]]:
     return out
 
 
+def make_batches(files: list[Path], dest: Path | None,
+                 size: int = BATCH_SIZE) -> list[tuple[list[Path], Path]]:
+    """(파일들, 저장폴더) 목록. dest 가 None 이면 각 파일의 원본 폴더에 저장한다.
+
+    다운로드는 배치마다 폴더를 한 번만 고를 수 있다. 원본 폴더에 저장하려면
+    한 배치에 한 폴더의 파일만 담아야 한다.
+    """
+    if dest is not None:
+        return [(part, dest) for part in chunks(files, size)]
+    out = []
+    for folder, group in group_by_folder(files).items():
+        out.extend((part, folder) for part in chunks(group, size))
+    return out
+
+
 def quoted_names(files: list[Path]) -> str:
     """파일명 칸에 넣을 문자열. 한 개면 따옴표 없이 이름만."""
     if len(files) == 1:
@@ -547,6 +562,13 @@ class MarkAny:
         log.info("신청 완료 (%d개)", len(files))
 
     # ---- 2) 최신 건 열어서 다운로드 ----------------------------------------
+    @staticmethod
+    def _mtime(p: Path):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return None
+
     def download_latest(self, dest: Path, files: list[Path]):
         self.main.set_focus()
         self._click(self.main, ID_MAIN_SEARCH, "검색")
@@ -563,16 +585,20 @@ class MarkAny:
         detail_handle = detail.wrapper_object().handle
         self._own.add(detail_handle)
 
+        # 원본 폴더에 저장하면 파일이 이미 있으므로 존재 여부로는 확인할 수
+        # 없다. 내려받기 전 수정 시각을 기억해 두고 바뀌었는지로 판단한다.
+        before = {f.name: self._mtime(dest / f.name) for f in files}
+
         self._click(detail, ID_DETAIL_DOWNLOAD, "파일다운")
         tries = self._download_pump(dest)
 
-        # 원본 파일명 그대로 저장됐는지 실제 파일로 확인한다. 복호화에 시간이
-        # 걸리고, 그 사이 "다운로드가 완료되었습니다" 알림이 뜨면 확인을 누른다.
+        # 복호화에 시간이 걸리고, 그 사이 "다운로드가 완료되었습니다" 알림이
+        # 뜨면 확인을 누른다.
         end = time.time() + 180
         while True:
             self._guard()
             self._handle_popups(tries)
-            missing = [f.name for f in files if not (dest / f.name).exists()]
+            missing = [n for n, t in before.items() if self._mtime(dest / n) == t]
             if not missing or time.time() > end:
                 break
             time.sleep(1.0)
@@ -633,14 +659,15 @@ class MarkAny:
         return tries
 
     # ---- 전체 실행 -------------------------------------------------------
-    def run(self, files: list[Path], dest: Path, subject: str, reason: str):
-        total = len(files)
+    def run(self, files: list[Path], dest: Path | None, subject: str, reason: str):
+        """dest 가 None 이면 각 파일을 원본 폴더에 저장한다."""
+        batches = make_batches(files, dest)
         done = 0
-        for n, batch in enumerate(chunks(files, BATCH_SIZE), 1):
-            log.info("=== 배치 %d (%d개) ===", n, len(batch))
+        for n, (batch, folder) in enumerate(batches, 1):
+            log.info("=== 배치 %d/%d (%d개 -> %s) ===", n, len(batches), len(batch), folder)
             self.request_batch(batch, subject, reason)
-            done += self.download_latest(dest, batch)
-        log.info("끝. 요청 %d개 / 저장 %d개", total, done)
+            done += self.download_latest(folder, batch)
+        log.info("끝. 요청 %d개 / 저장 %d개", len(files), done)
         return done
 
 
@@ -735,16 +762,35 @@ def gui():
 
     opts = ttk.Frame(frm)
     opts.pack(fill="x", pady=6)
-    ttk.Label(opts, text="저장 폴더").grid(row=0, column=0, sticky="w")
-    dest_var = tk.StringVar(value=str(Path.home() / "Downloads"))
-    ttk.Entry(opts, textvariable=dest_var, width=60).grid(row=0, column=1, padx=4)
-    ttk.Button(opts, text="찾아보기",
-               command=lambda: dest_var.set(filedialog.askdirectory() or dest_var.get())
-               ).grid(row=0, column=2)
 
-    ttk.Label(opts, text="제목 / 사유").grid(row=1, column=0, sticky="w", pady=4)
+    ttk.Label(opts, text="저장 위치").grid(row=0, column=0, sticky="w")
+    mode_var = tk.StringVar(value="fixed")
+    modes = ttk.Frame(opts)
+    modes.grid(row=0, column=1, sticky="w", padx=4)
+    ttk.Radiobutton(modes, text="지정 폴더", variable=mode_var,
+                    value="fixed").pack(side="left")
+    ttk.Radiobutton(modes, text="원본 폴더 (원본을 덮어씁니다)", variable=mode_var,
+                    value="source").pack(side="left", padx=8)
+
+    ttk.Label(opts, text="저장 폴더").grid(row=1, column=0, sticky="w")
+    dest_var = tk.StringVar(value=str(Path.home() / "Downloads"))
+    dest_entry = ttk.Entry(opts, textvariable=dest_var, width=60)
+    dest_entry.grid(row=1, column=1, padx=4)
+    browse_btn = ttk.Button(
+        opts, text="찾아보기",
+        command=lambda: dest_var.set(filedialog.askdirectory() or dest_var.get()))
+    browse_btn.grid(row=1, column=2)
+
+    def sync_mode(*_):
+        state = "disabled" if mode_var.get() == "source" else "normal"
+        dest_entry.configure(state=state)
+        browse_btn.configure(state=state)
+
+    mode_var.trace_add("write", sync_mode)
+
+    ttk.Label(opts, text="제목 / 사유").grid(row=2, column=0, sticky="w", pady=4)
     subject_var = tk.StringVar(value="복호화A")
-    ttk.Entry(opts, textvariable=subject_var, width=60).grid(row=1, column=1, padx=4, sticky="w")
+    ttk.Entry(opts, textvariable=subject_var, width=60).grid(row=2, column=1, padx=4, sticky="w")
 
     logbox = tk.Text(frm, height=14, state="disabled")
     logbox.pack(fill="both", expand=True, pady=6)
@@ -801,17 +847,31 @@ def gui():
 
     def start():
         files = collect_files(paths)
-        dest = Path(dest_var.get())
         if not files:
             messagebox.showwarning("확인", "파일이나 폴더를 먼저 추가하세요.")
             return
-        if not dest_var.get().strip():
-            messagebox.showwarning("확인", "저장 폴더를 지정하세요.")
-            return
-        dest.mkdir(parents=True, exist_ok=True)
-        setup_logging(dest, GuiHandler())
-        log.info("대상 %d개 파일, %d배치 (중지: ESC)",
-                 len(files), -(-len(files) // BATCH_SIZE))
+
+        to_source = mode_var.get() == "source"
+        if to_source:
+            if not messagebox.askyesno(
+                    "원본 폴더에 저장",
+                    f"복호화한 {len(files)}개 파일을 원본 폴더에 같은 이름으로 저장합니다.\n"
+                    "원본 파일은 덮어써지며 되돌릴 수 없습니다.\n\n계속할까요?"):
+                return
+            dest = None
+        else:
+            if not dest_var.get().strip():
+                messagebox.showwarning("확인", "저장 폴더를 지정하세요.")
+                return
+            dest = Path(dest_var.get())
+            dest.mkdir(parents=True, exist_ok=True)
+
+        log_dir = Path(dest_var.get().strip() or Path.home())
+        log_dir.mkdir(parents=True, exist_ok=True)
+        setup_logging(log_dir, GuiHandler())
+        batches = make_batches(files, dest)
+        log.info("대상 %d개 파일, %d배치, 저장 위치: %s (중지: ESC)",
+                 len(files), len(batches), "원본 폴더" if to_source else dest)
         stop.clear()
         finished.clear()
         start_btn.configure(state="disabled")
@@ -868,6 +928,24 @@ def selftest():
         assert list(groups) == [root, root / "sub"], list(groups)
         assert [f.name for f in groups[root]] == ["a.pdf"]
         assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
+
+    # 저장 위치. 지정 폴더면 15개씩, 원본 폴더면 폴더 단위로도 쪼갠다
+    # (다운로드는 배치마다 폴더를 한 번만 고를 수 있다).
+    a = [Path(f"D:/원본/a{i}.hwp") for i in range(20)]
+    b = [Path(f"D:/다른/b{i}.hwp") for i in range(3)]
+
+    fixed = make_batches(a + b, Path("C:/저장"))
+    assert [len(p) for p, _ in fixed] == [15, 8], fixed
+    assert all(d == Path("C:/저장") for _, d in fixed)
+
+    src = make_batches(a + b, None)
+    assert [(len(p), d) for p, d in src] == [
+        (15, Path("D:/원본")), (5, Path("D:/원본")), (3, Path("D:/다른"))], src
+    # 원본 폴더 모드는 배치 안 파일이 모두 그 폴더 소속이어야 한다
+    assert all(f.parent == d for p, d in src for f in p)
+    # 어느 쪽이든 파일이 빠지거나 순서가 섞이지 않는다
+    for batches in (fixed, src):
+        assert [f for p, _ in batches for f in p] == a + b
 
     # 열기 대화상자에는 Edit 이 여러 개다. 주소 표시줄이 아니라
     # 파일명 칸을 골라야 한다 (예전에 여기서 탐지가 통째로 실패했다).
