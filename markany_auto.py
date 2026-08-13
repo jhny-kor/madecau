@@ -52,6 +52,17 @@ OK_TEXTS = ("확인", "예", "&예", "OK", "&Yes")
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".alz", ".egg", ".tar", ".gz", ".bz2",
                 ".xz", ".cab", ".iso", ".lzh", ".arj", ".ace"}
 
+# 확장자별 원본 시그니처. 헤더가 이대로면 암호화가 풀린 상태라 MarkAny 가
+# "일반파일은 첨부할 수 없습니다" 로 거부한다. 모르는 확장자(.txt 등)는
+# 판단하지 않고 첨부해서 MarkAny 가 결정하게 둔다.
+_OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # hwp, doc, xls, ppt
+_ZIP = b"PK\x03\x04"                         # hwpx, docx, xlsx, pptx
+FILE_MAGIC = {
+    ".hwp": _OLE2, ".doc": _OLE2, ".xls": _OLE2, ".ppt": _OLE2,
+    ".hwpx": _ZIP, ".docx": _ZIP, ".xlsx": _ZIP, ".pptx": _ZIP,
+    ".pdf": b"%PDF",
+}
+
 # 거부된 파일마다 "일반파일은 첨부할 수 없습니다" 팝업이 하나씩 뜬다.
 REJECT_POPUP_WAIT = 3.0
 # 신청은 첨부 파일을 서버로 올리므로 오래 걸린다.
@@ -97,6 +108,31 @@ def split_archives(files: list[Path]) -> tuple[list[Path], list[Path]]:
     for f in files:
         (archives if f.suffix.lower() in ARCHIVE_EXTS else keep).append(f)
     return keep, archives
+
+
+def looks_decrypted(path: Path) -> bool:
+    """헤더가 원본 형식 그대로면 True (이미 복호화됨). 판단 불가면 False.
+
+    한쪽으로만 틀리게 만들었다. 확실할 때만 True 를 주므로, 놓치면 첨부됐다가
+    MarkAny 가 거부할 뿐이다. 반대로 틀리면 복호화가 필요한 파일을 건너뛴다.
+    """
+    magic = FILE_MAGIC.get(path.suffix.lower())
+    if magic is None:
+        return False
+    try:
+        with path.open("rb") as fh:
+            return fh.read(len(magic)) == magic
+    except OSError:
+        return False
+
+
+def split_decrypted(files: list[Path]) -> tuple[list[Path], list[Path]]:
+    """(첨부할 파일, 이미 복호화된 것으로 보이는 파일)."""
+    todo: list[Path] = []
+    done: list[Path] = []
+    for f in files:
+        (done if looks_decrypted(f) else todo).append(f)
+    return todo, done
 
 
 def chunks(seq, n):
@@ -904,6 +940,10 @@ def gui():
     subject_var = tk.StringVar(value="복호화A")
     ttk.Entry(opts, textvariable=subject_var, width=60).grid(row=2, column=1, padx=4, sticky="w")
 
+    precheck_var = tk.BooleanVar(value=True)
+    ttk.Checkbutton(opts, text="이미 복호화된 파일 미리 제외 (헤더 검사)",
+                    variable=precheck_var).grid(row=3, column=1, sticky="w", pady=2)
+
     logbox = tk.Text(frm, height=14, state="disabled")
     logbox.pack(fill="both", expand=True, pady=6)
 
@@ -959,11 +999,15 @@ def gui():
 
     def start():
         files, archives = split_archives(collect_files(paths))
+        decrypted: list[Path] = []
+        if precheck_var.get():
+            files, decrypted = split_decrypted(files)
         if not files:
             messagebox.showwarning(
                 "확인",
-                "압축파일만 있습니다. 압축을 풀고 추가하세요." if archives
-                else "파일이나 폴더를 먼저 추가하세요.")
+                "복호화할 파일이 없습니다. "
+                f"(압축파일 {len(archives)}개, 이미 복호화됨 {len(decrypted)}개)"
+                if archives or decrypted else "파일이나 폴더를 먼저 추가하세요.")
             return
 
         to_source = mode_var.get() == "source"
@@ -986,6 +1030,8 @@ def gui():
         setup_logging(log_dir, GuiHandler())
         for f in archives:
             log.warning("압축파일 제외: %s", f.name)
+        for f in decrypted:
+            log.warning("이미 복호화됨 제외 (헤더 확인): %s", f.name)
         batches = make_batches(files, dest)
         log.info("대상 %d개 파일, %d배치, 저장 위치: %s (중지: ESC)",
                  len(files), len(batches), "원본 폴더" if to_source else dest)
@@ -1045,6 +1091,25 @@ def selftest():
         assert list(groups) == [root, root / "sub"], list(groups)
         assert [f.name for f in groups[root]] == ["a.pdf"]
         assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
+
+    # 헤더로 복호화 여부 판별. 원본 시그니처가 보이면 이미 풀린 파일이다.
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        cases = {
+            "풀린.hwp": _OLE2 + b"rest",
+            "잠긴.hwp": b"MADRM\x00\x01\x02\x03",
+            "풀린.pdf": b"%PDF-1.7\n",
+            "잠긴.pdf": b"\x00\x01\x02\x03%PDF",   # 헤더가 앞에 없으면 암호화
+            "풀린.docx": _ZIP + b"rest",
+            "메모.txt": "아무거나".encode(),       # 시그니처 없는 확장자
+        }
+        for name, data in cases.items():
+            (root / name).write_bytes(data)
+        todo, done = split_decrypted([root / n for n in cases])
+        assert [f.name for f in done] == ["풀린.hwp", "풀린.pdf", "풀린.docx"], done
+        # 판단 못 하는 건 첨부해서 MarkAny 가 결정하게 둔다
+        assert [f.name for f in todo] == ["잠긴.hwp", "잠긴.pdf", "메모.txt"], todo
+        assert not looks_decrypted(root / "없는파일.hwp")  # 못 읽으면 False
 
     # 압축파일은 MarkAny 가 거부하므로 첨부 대상에서 미리 뺀다.
     mixed = [Path("D:/원본/문서.hwp"), Path("D:/원본/모음.ZIP"),
