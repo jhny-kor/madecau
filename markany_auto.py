@@ -48,6 +48,17 @@ FILE_DIALOG_TITLES = ("열기", "Open", "다른 이름으로 저장", "Save",
 APPLY_ALL_TEXT = "이하 동일"  # "이하 동일 파일에 적용" 체크박스
 OK_TEXTS = ("확인", "예", "&예", "OK", "&Yes")
 
+# 압축파일은 MarkAny 가 거부하므로 아예 첨부하지 않는다.
+ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".alz", ".egg", ".tar", ".gz", ".bz2",
+                ".xz", ".cab", ".iso", ".lzh", ".arj", ".ace"}
+
+# 거부된 파일마다 "일반파일은 첨부할 수 없습니다" 팝업이 하나씩 뜬다.
+REJECT_POPUP_WAIT = 3.0
+# 신청은 첨부 파일을 서버로 올리므로 오래 걸린다.
+SUBMIT_TIMEOUT = 300.0
+# 다운로드는 복호화까지 끝나야 파일이 나타난다.
+DOWNLOAD_TIMEOUT = 180.0
+
 # 자동 중단 키워드 (README: 승인/OTP/관리자 화면은 건드리지 않는다)
 ABORT_KEYWORDS = ("OTP", "관리자 권한", "본인 인증", "인증서")
 
@@ -73,6 +84,19 @@ def collect_files(paths) -> list[Path]:
             seen.add(key)
             uniq.append(f)
     return uniq
+
+
+def split_archives(files: list[Path]) -> tuple[list[Path], list[Path]]:
+    """(첨부할 파일, 제외할 압축파일).
+
+    압축파일은 MarkAny 가 첨부를 거부하며 파일마다 팝업을 띄운다. 어차피
+    안 되는 것을 넣어 팝업을 만들 이유가 없으므로 미리 뺀다.
+    """
+    keep: list[Path] = []
+    archives: list[Path] = []
+    for f in files:
+        (archives if f.suffix.lower() in ARCHIVE_EXTS else keep).append(f)
+    return keep, archives
 
 
 def chunks(seq, n):
@@ -222,17 +246,24 @@ class MarkAny:
             return True
         return False
 
-    def _dismiss_messageboxes(self, seconds=3.0, hard_limit=30.0):
-        """더 뜰 게 없을 때까지 팝업을 닫는다."""
+    def _dismiss_messageboxes(self, seconds=3.0, hard_limit=60.0) -> int:
+        """더 뜰 게 없을 때까지 팝업을 닫고, 누른 횟수를 돌려준다.
+
+        거부된 파일마다 팝업이 하나씩 뜨므로 하나 처리할 때마다 마감을 늘려
+        다음 팝업을 기다린다.
+        """
         deadline = time.time() + seconds
         hard_end = time.time() + hard_limit
         tries: dict[int, int] = {}
+        clicked = 0
         while time.time() < deadline and time.time() < hard_end:
             self._guard()
             if self._handle_popups(tries):
+                clicked += 1
                 deadline = time.time() + seconds
             else:
                 time.sleep(0.3)
+        return clicked
 
     @staticmethod
     def _find_button(win, texts):
@@ -516,9 +547,11 @@ class MarkAny:
             self._cancel_dialog(dlg)
             return 0
 
-        # 압축파일이나 이미 복호화된 일반 파일이면 여기서 오류 팝업이 뜬다.
-        # 확인을 눌러 닫고, 붙은 개수만 세서 계속한다.
-        self._dismiss_messageboxes(seconds=2)
+        # 이미 복호화된 일반 파일이면 "일반파일은 첨부할 수 없습니다" 팝업이
+        # 파일마다 하나씩 뜬다. 전부 확인을 눌러 닫고, 붙은 개수만 세서 계속한다.
+        clicked = self._dismiss_messageboxes(seconds=REJECT_POPUP_WAIT)
+        if clicked:
+            log.info("첨부 거부 팝업 %d개 확인", clicked)
         return lv.item_count() - before
 
     @staticmethod
@@ -593,13 +626,27 @@ class MarkAny:
             self._own.discard(req_handle)
             return []
 
+        # 거부 팝업이 더 없는 걸 확인하고 제목부터 채운다.
+        self._dismiss_messageboxes(seconds=REJECT_POPUP_WAIT)
+
         self._set_text(req, ID_REQ_SUBJECT, subject, "제목")
         self._select_combo(req, ID_REQ_PREPOST, PREPOST_INDEX, "사전/사후")
         self._set_text(req, ID_REQ_REASON, reason, "사유")
 
         self._click(req, ID_REQ_SUBMIT, "신청")
-        self._dismiss_messageboxes(seconds=4)  # "신청하시겠습니까?" / 완료 알림
-        req.wait_not("visible", timeout=30)
+
+        # 신청은 첨부 파일을 올리므로 시간이 걸린다. "신청하시겠습니까?" 와
+        # 완료 알림을 처리하면서 창이 닫힐 때까지 기다린다.
+        end = time.time() + SUBMIT_TIMEOUT
+        tries: dict[int, int] = {}
+        while self._alive(req):
+            self._guard()
+            if time.time() > end:
+                raise RuntimeError(
+                    f"신청이 {SUBMIT_TIMEOUT:.0f}초 안에 끝나지 않았습니다."
+                )
+            if not self._handle_popups(tries):
+                time.sleep(0.5)
         self._own.discard(req_handle)
         log.info("신청 완료 (%d개)", len(attached))
         return attached
@@ -637,7 +684,7 @@ class MarkAny:
 
         # 복호화에 시간이 걸리고, 그 사이 "다운로드가 완료되었습니다" 알림이
         # 뜨면 확인을 누른다.
-        end = time.time() + 180
+        end = time.time() + DOWNLOAD_TIMEOUT
         while True:
             self._guard()
             self._handle_popups(tries)
@@ -911,9 +958,12 @@ def gui():
         msgs.put("중지 요청됨. 진행 중인 단계가 끝나면 멈춥니다.")
 
     def start():
-        files = collect_files(paths)
+        files, archives = split_archives(collect_files(paths))
         if not files:
-            messagebox.showwarning("확인", "파일이나 폴더를 먼저 추가하세요.")
+            messagebox.showwarning(
+                "확인",
+                "압축파일만 있습니다. 압축을 풀고 추가하세요." if archives
+                else "파일이나 폴더를 먼저 추가하세요.")
             return
 
         to_source = mode_var.get() == "source"
@@ -934,6 +984,8 @@ def gui():
         log_dir = Path(dest_var.get().strip() or Path.home())
         log_dir.mkdir(parents=True, exist_ok=True)
         setup_logging(log_dir, GuiHandler())
+        for f in archives:
+            log.warning("압축파일 제외: %s", f.name)
         batches = make_batches(files, dest)
         log.info("대상 %d개 파일, %d배치, 저장 위치: %s (중지: ESC)",
                  len(files), len(batches), "원본 폴더" if to_source else dest)
@@ -993,6 +1045,15 @@ def selftest():
         assert list(groups) == [root, root / "sub"], list(groups)
         assert [f.name for f in groups[root]] == ["a.pdf"]
         assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
+
+    # 압축파일은 MarkAny 가 거부하므로 첨부 대상에서 미리 뺀다.
+    mixed = [Path("D:/원본/문서.hwp"), Path("D:/원본/모음.ZIP"),
+             Path("D:/원본/자료.tar.gz"), Path("D:/원본/보고서.pdf"),
+             Path("D:/원본/백업.alz")]
+    keep, archives = split_archives(mixed)
+    assert [f.name for f in keep] == ["문서.hwp", "보고서.pdf"], keep
+    assert [f.name for f in archives] == ["모음.ZIP", "자료.tar.gz", "백업.alz"], archives
+    assert len(keep) + len(archives) == len(mixed)  # 빠지는 파일 없음
 
     # 첨부 목록 판독. 거부된 파일을 건너뛰려면 실제로 붙은 이름을 알아야 한다.
     class _LV:
