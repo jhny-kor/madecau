@@ -16,7 +16,7 @@ import queue
 import sys
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 BATCH_SIZE = 15  # 반출 신청 팝업의 "(개수 : 15 / 사이즈 : 무제한)"
 
@@ -515,41 +515,83 @@ class MarkAny:
             # 다중 선택을 막는 대화상자면 "파일을 찾을 수 없습니다" 류가 뜬다.
             self._cancel_dialog(dlg)
             return 0
+
+        # 압축파일이나 이미 복호화된 일반 파일이면 여기서 오류 팝업이 뜬다.
+        # 확인을 눌러 닫고, 붙은 개수만 세서 계속한다.
+        self._dismiss_messageboxes(seconds=2)
         return lv.item_count() - before
 
-    def _attach_all(self, req, files: list[Path]):
+    @staticmethod
+    def _attached_names(lv) -> set[str]:
+        """첨부 목록에 실제로 올라간 파일명(소문자).
+
+        목록이 전체 경로를 보여줄 수도 있어 이름만 떼어낸다. 윈도우 앱이 준
+        문자열이므로 역슬래시를 구분자로 읽는다.
+        """
+        names = set()
+        for i in range(lv.item_count()):
+            try:
+                text = (lv.get_item(i).text() or "").strip()
+            except Exception:
+                continue
+            if text:
+                names.add(PureWindowsPath(text).name.lower())
+        return names
+
+    def _attach_all(self, req, files: list[Path]) -> list[Path]:
+        """첨부하고 실제로 붙은 파일만 돌려준다.
+
+        압축파일이나 이미 복호화된 일반 파일은 MarkAny 가 거부하면서 오류
+        팝업을 띄운다. 확인을 눌러 닫고 그 파일만 건너뛴 채 계속한다.
+        """
         lv = req.child_window(control_id=ID_REQ_FILELIST,
                               class_name="SysListView32").wrapper_object()
         for folder, group in group_by_folder(files).items():
             for part in pack_names(group):
                 added = self._attach_from_folder(req, lv, folder, part)
-                if added == len(part):
-                    log.info("첨부 %d개: %s", added, folder)
+                log.info("첨부 %d/%d개: %s", added, len(part), folder)
+                if added or len(part) == 1:
                     continue
-                if added:
-                    raise RuntimeError(
-                        f"{folder} 에서 {len(part)}개 중 {added}개만 첨부되었습니다."
-                    )
-                # ponytail: 다중 선택을 안 받는 대화상자면 한 개씩. 느리지만 확실하다.
-                log.warning("다중 선택이 안 되어 한 개씩 첨부합니다: %s", folder)
+                # 하나도 안 붙었다. 다중 선택을 안 받는 대화상자일 수 있으니
+                # 한 개씩 넣어본다. 거부당한 파일이면 여기서도 안 붙고 넘어간다.
+                # ponytail: 느리지만 확실하다.
+                log.warning("한 개씩 다시 첨부합니다: %s", folder)
                 for f in part:
-                    if self._attach_from_folder(req, lv, folder, [f]) != 1:
-                        raise RuntimeError(f"첨부 실패: {f}")
-                    log.info("첨부: %s", f.name)
+                    self._attach_from_folder(req, lv, folder, [f])
 
-        got = lv.item_count()
-        if got != len(files):
-            raise RuntimeError(f"첨부 개수 불일치: 기대 {len(files)}, 실제 {got}")
+        count = lv.item_count()
+        attached = self._attached_names(lv)
+        ok = [f for f in files if f.name.lower() in attached]
+        if count and not ok:
+            raise NeedsCapture(
+                f"첨부 목록 {count}건을 읽었지만 파일명을 맞추지 못했습니다: "
+                f"{sorted(attached)[:3]}"
+            )
+        for f in files:
+            if f.name.lower() not in attached:
+                log.warning("건너뜀 (첨부 거부됨): %s", f.name)
+        return ok
 
     # ---- 1) 반출 신청 -----------------------------------------------------
-    def request_batch(self, files: list[Path], subject: str, reason: str):
+    def request_batch(self, files: list[Path], subject: str, reason: str) -> list[Path]:
+        """신청하고 실제로 첨부된 파일 목록을 돌려준다. 하나도 없으면 빈 목록."""
         self.main.set_focus()
         self._click(self.main, ID_MAIN_REQUEST, "반출 신청")
         req = self._wait(title=REQ_TITLE, timeout=20)
         req_handle = req.wrapper_object().handle
         self._own.add(req_handle)
 
-        self._attach_all(req, files)
+        attached = self._attach_all(req, files)
+        if not attached:
+            log.warning("첨부된 파일이 없어 이 배치를 건너뜁니다.")
+            try:
+                req.close()
+                time.sleep(0.5)
+            except Exception as e:  # noqa: BLE001
+                log.warning("반출 신청 창을 닫지 못했습니다: %s", e)
+            self._dismiss_messageboxes(seconds=2)
+            self._own.discard(req_handle)
+            return []
 
         self._set_text(req, ID_REQ_SUBJECT, subject, "제목")
         self._select_combo(req, ID_REQ_PREPOST, PREPOST_INDEX, "사전/사후")
@@ -559,7 +601,8 @@ class MarkAny:
         self._dismiss_messageboxes(seconds=4)  # "신청하시겠습니까?" / 완료 알림
         req.wait_not("visible", timeout=30)
         self._own.discard(req_handle)
-        log.info("신청 완료 (%d개)", len(files))
+        log.info("신청 완료 (%d개)", len(attached))
+        return attached
 
     # ---- 2) 최신 건 열어서 다운로드 ----------------------------------------
     @staticmethod
@@ -663,11 +706,15 @@ class MarkAny:
         """dest 가 None 이면 각 파일을 원본 폴더에 저장한다."""
         batches = make_batches(files, dest)
         done = 0
+        skipped = 0
         for n, (batch, folder) in enumerate(batches, 1):
             log.info("=== 배치 %d/%d (%d개 -> %s) ===", n, len(batches), len(batch), folder)
-            self.request_batch(batch, subject, reason)
-            done += self.download_latest(folder, batch)
-        log.info("끝. 요청 %d개 / 저장 %d개", len(files), done)
+            attached = self.request_batch(batch, subject, reason)
+            skipped += len(batch) - len(attached)
+            if not attached:
+                continue
+            done += self.download_latest(folder, attached)
+        log.info("끝. 요청 %d개 / 저장 %d개 / 건너뜀 %d개", len(files), done, skipped)
         return done
 
 
@@ -724,9 +771,15 @@ def gui():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
-    root = tk.Tk()
+    # tkinterdnd2 가 있으면 드래그앤드롭이 되는 root 를 쓴다. 없으면 버튼만.
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+        root, dnd = TkinterDnD.Tk(), True
+    except Exception:  # noqa: BLE001
+        root, dnd, DND_FILES = tk.Tk(), False, None
+
     root.title("MarkAny 복호화 자동화")
-    root.geometry("720x560")
+    root.geometry("720x580")
 
     paths: list[str] = []
     msgs: queue.Queue[str] = queue.Queue()
@@ -734,23 +787,35 @@ def gui():
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill="both", expand=True)
 
-    ttk.Label(frm, text="복호화할 파일 / 폴더").pack(anchor="w")
+    ttk.Label(frm, text="복호화할 파일 / 폴더"
+                       + ("  (여기로 끌어다 놓으세요)" if dnd else "")).pack(anchor="w")
     lb = tk.Listbox(frm, height=8)
     lb.pack(fill="both", expand=True)
+
+    def add_path(p: str):
+        p = p.strip()
+        if not p or p in paths:
+            return
+        paths.append(p)
+        lb.insert("end", p + ("  (폴더)" if Path(p).is_dir() else ""))
+
+    if dnd:
+        # 윈도우는 공백이 든 경로를 중괄호로 감싸 보낸다. splitlist 가 풀어준다.
+        lb.drop_target_register(DND_FILES)
+        lb.dnd_bind("<<Drop>>",
+                    lambda e: [add_path(p) for p in root.tk.splitlist(e.data)])
 
     row = ttk.Frame(frm)
     row.pack(fill="x", pady=4)
 
     def add_files():
         for f in filedialog.askopenfilenames():
-            paths.append(f)
-            lb.insert("end", f)
+            add_path(f)
 
     def add_folder():
         d = filedialog.askdirectory()
         if d:
-            paths.append(d)
-            lb.insert("end", d + "  (폴더)")
+            add_path(d)
 
     def clear():
         paths.clear()
@@ -928,6 +993,27 @@ def selftest():
         assert list(groups) == [root, root / "sub"], list(groups)
         assert [f.name for f in groups[root]] == ["a.pdf"]
         assert [f.name for f in groups[root / "sub"]] == ["b.hwp"]
+
+    # 첨부 목록 판독. 거부된 파일을 건너뛰려면 실제로 붙은 이름을 알아야 한다.
+    class _LV:
+        def __init__(self, texts):
+            self._texts = texts
+
+        def item_count(self):
+            return len(self._texts)
+
+        def get_item(self, i):
+            text = self._texts[i]
+            return type("It", (), {"text": lambda self, t=text: t})()
+
+    lv = _LV([r"D:\원본\가 나.hwp", "다.PDF", "   ", None])
+    names = MarkAny._attached_names(lv)
+    assert names == {"가 나.hwp", "다.pdf"}, names  # 경로는 이름만, 대소문자 무시
+
+    wanted = [Path("D:/원본/가 나.hwp"), Path("D:/원본/다.pdf"),
+              Path("D:/원본/압축.zip")]
+    ok = [f for f in wanted if f.name.lower() in names]
+    assert [f.name for f in ok] == ["가 나.hwp", "다.pdf"], ok  # 거부된 zip 은 빠진다
 
     # 저장 위치. 지정 폴더면 15개씩, 원본 폴더면 폴더 단위로도 쪼갠다
     # (다운로드는 배치마다 폴더를 한 번만 고를 수 있다).

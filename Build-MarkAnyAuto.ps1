@@ -31,9 +31,9 @@ if (-not (Test-Path $venvPython)) {
     & $Python -m venv $venv
 }
 
-Write-Output "의존성 설치 (pywinauto, pyinstaller)..."
+Write-Output "의존성 설치 (pywinauto, tkinterdnd2, pyinstaller)..."
 & $venvPython -m pip install --upgrade pip | Out-Null
-& $venvPython -m pip install pywinauto pyinstaller
+& $venvPython -m pip install pywinauto tkinterdnd2 pyinstaller
 if ($LASTEXITCODE -ne 0) { throw "pip 설치에 실패했습니다." }
 
 & $venvPython $script --selftest
@@ -51,6 +51,7 @@ Write-Output "실행 파일 빌드..."
     --specpath (Join-Path $root ".build") `
     --collect-all pywinauto `
     --collect-all comtypes `
+    --collect-all tkinterdnd2 `
     $script
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 빌드에 실패했습니다." }
 

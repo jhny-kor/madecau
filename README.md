@@ -42,7 +42,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-MarkAnyAuto.ps1
 
 ## 자동화 실행
 
-빌드한 exe를 실행하거나, 개발 중이라면 `pip install pywinauto` 후 직접 실행합니다.
+빌드한 exe를 실행하거나, 개발 중이라면 `pip install pywinauto tkinterdnd2` 후 직접 실행합니다.
+(`tkinterdnd2` 는 드래그앤드롭 전용입니다. 없으면 `파일 추가` / `폴더 추가` 버튼만 쓸 수 있고 나머지는 그대로 동작합니다.)
 
 ```powershell
 python markany_auto.py            # GUI
@@ -54,7 +55,9 @@ python markany_auto.py --dump     # 지금 떠 있는 ESAgent 창 구조 출력
 
 GUI의 `창 구조 저장` 버튼은 `--dump` 와 같은 내용을 저장 폴더의 `markany_dump.txt` 로 남깁니다. 모르는 팝업이 떠서 멈췄을 때 이 파일을 확인합니다.
 
-MADRMAgent(문서보안) 창을 열어둔 채 GUI에서 파일 또는 폴더를 추가하고 저장 위치를 고른 뒤 시작합니다.
+MADRMAgent(문서보안) 창을 열어둔 채 GUI에서 파일 또는 폴더를 추가하고 저장 위치를 고른 뒤 시작합니다. 목록 칸에 파일이나 폴더를 **끌어다 놓아도** 추가됩니다.
+
+압축파일이나 이미 복호화된 일반 파일은 MarkAny가 첨부를 거부하면서 오류 팝업을 띄웁니다. 이때 확인을 눌러 닫고 **그 파일만 건너뛴 채 계속** 진행합니다. 건너뛴 파일은 로그에 `건너뜀 (첨부 거부됨)` 으로 남고, 마지막 줄에 개수가 집계됩니다.
 
 저장 위치는 둘 중 하나입니다.
 
