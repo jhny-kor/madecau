@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script = Join-Path $root "markany_auto.py"
+$icon = Join-Path $root "MarkAnyAuto.ico"
 $venv = Join-Path $root ".build\venv"
 $venvPython = Join-Path $venv "Scripts\python.exe"
 $dist = Join-Path $root "dist"
@@ -25,6 +26,8 @@ if ($SelfTest) {
     Write-Output "self-test: ok"
     exit 0
 }
+
+if (-not (Test-Path $icon)) { throw "아이콘이 없습니다: $icon" }
 
 if (-not (Test-Path $venvPython)) {
     Write-Output "빌드용 가상환경 생성: $venv"
@@ -46,6 +49,8 @@ Write-Output "실행 파일 빌드..."
     --onefile `
     --windowed `
     --name MarkAnyAuto `
+    --icon $icon `
+    --add-data "$icon;." `
     --distpath $dist `
     --workpath (Join-Path $root ".build\work") `
     --specpath (Join-Path $root ".build") `

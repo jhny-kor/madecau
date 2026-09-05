@@ -1,4 +1,4 @@
-# MarkAny UI 자동화
+# madecau
 
 Windows의 공식 MarkAny 복호화 화면을 사용자 권한 범위에서 순차 조작하기 위한 별도 도구입니다.
 
@@ -37,6 +37,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-MarkAnyAuto.ps1
 
 설치 파일이 필요 없으면 `-SkipInstaller` 를 붙입니다.
 
+설치 화면과 제어판 프로그램 목록에는 이름이 `madecau`, 개발자가 `김지현` 으로 뜹니다.
+창 제목과 사이드바에도 같은 이름이 나옵니다 (`markany_auto.py` 의 `APP_NAME`).
+`MarkAnyAuto.iss` 의 `AppName` / `AppPublisher` 입니다.
+
+### 아이콘
+
+`MarkAnyAuto.ico` 는 저장소에 들어 있습니다. 빌드 스크립트가 exe 에 박고 설치 파일에도 씁니다.
+모양을 고치려면 `tools/make_icon.py` 를 손보고 다시 굽습니다 (Pillow 필요, 빌드에는 안 쓰입니다).
+
+```bash
+python3 tools/make_icon.py
+```
+
+MarkAny 마크의 각진 아스테리스크를 변형해 가운데를 열쇠구멍으로 뚫은 모양입니다.
+16/32px 는 구멍이 메워지므로 구멍을 키운 별도 도안에서 뽑습니다.
+
 > `Build-MarkAnyAuto.ps1` 과 `MarkAnyAuto.iss` 는 **UTF-8 BOM**으로 저장해야 합니다.
 > BOM이 없으면 Windows PowerShell 5.1이 파일을 CP949로 읽어 한글이 깨지고, Inno Setup이 `[Setup]` 지시자를 인식하지 못합니다.
 
@@ -54,6 +70,9 @@ python markany_auto.py --dump     # 지금 떠 있는 ESAgent 창 구조 출력
 진행 중 **ESC** 를 누르면 중지합니다. 자동화가 마우스와 포커스를 가져가므로 GUI를 클릭할 필요 없이 어디서든 누르면 됩니다. GUI의 `중지` 버튼도 같은 동작입니다. 현재 진행 중인 단계가 끝나는 시점에 멈춥니다.
 
 GUI의 `창 구조 저장` 버튼은 `--dump` 와 같은 내용을 저장 폴더의 `markany_dump.txt` 로 남깁니다. 모르는 팝업이 떠서 멈췄을 때 이 파일을 확인합니다.
+
+창은 왼쪽 사이드바(대상 파일 수, 배치, 진행률, 상태)와 오른쪽 본문(파일 목록 / 저장 설정 / 진행 기록)으로 나뉩니다.
+사이드바 숫자는 `시작` 을 누른 뒤부터 채워집니다.
 
 MADRMAgent(문서보안) 창을 열어둔 채 GUI에서 파일 또는 폴더를 추가하고 저장 위치를 고른 뒤 시작합니다. 목록 칸에 파일이나 폴더를 **끌어다 놓아도** 추가됩니다.
 

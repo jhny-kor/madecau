@@ -18,6 +18,8 @@ import threading
 import time
 from pathlib import Path, PureWindowsPath
 
+APP_NAME = "madecau"
+
 BATCH_SIZE = 15  # 반출 신청 팝업의 "(개수 : 15 / 사이즈 : 무제한)"
 
 # ponytail: 파일명 칸은 MAX_PATH(260자) 근처에서 입력을 잘라낸다. 여유를 두고
@@ -785,12 +787,18 @@ class MarkAny:
         return tries
 
     # ---- 전체 실행 -------------------------------------------------------
-    def run(self, files: list[Path], dest: Path | None, subject: str, reason: str):
-        """dest 가 None 이면 각 파일을 원본 폴더에 저장한다."""
+    def run(self, files: list[Path], dest: Path | None, subject: str, reason: str,
+            on_progress=None):
+        """dest 가 None 이면 각 파일을 원본 폴더에 저장한다.
+
+        on_progress(배치번호, 전체, 저장수, 건너뜀수) 는 배치 시작마다 불린다.
+        """
         batches = make_batches(files, dest)
         done = 0
         skipped = 0
         for n, (batch, folder) in enumerate(batches, 1):
+            if on_progress:
+                on_progress(n, len(batches), done, skipped)
             log.info("=== 배치 %d/%d (%d개 -> %s) ===", n, len(batches), len(batch), folder)
             attached = self.request_batch(batch, subject, reason)
             skipped += len(batch) - len(attached)
@@ -850,6 +858,20 @@ def dump_windows(out_path: Path | None = None):
 # --------------------------------------------------------------------------
 # GUI
 # --------------------------------------------------------------------------
+def _res(name: str) -> Path:
+    """얼린 exe 안이면 임시 해제 폴더, 아니면 소스 파일 옆."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).parent)) / name
+
+
+# 사이드바 색. MarkAny 마크의 네이비(#10448F)에서 내린 톤.
+SIDE_BG = "#143C5E"
+SIDE_FG = "#E8EEF5"
+SIDE_DIM = "#9FB6CC"
+SIDE_HINT = "#7A97B3"
+SIDE_TROUGH = "#0C2A44"
+SIDE_BAR = "#5BA3E8"
+
+
 def gui():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -861,18 +883,66 @@ def gui():
     except Exception:  # noqa: BLE001
         root, dnd, DND_FILES = tk.Tk(), False, None
 
-    root.title("MarkAny 복호화 자동화")
-    root.geometry("720x580")
+    root.title(APP_NAME)
+    root.geometry("900x560")
+    try:
+        root.iconbitmap(default=str(_res("MarkAnyAuto.ico")))
+    except Exception:  # noqa: BLE001
+        pass  # 아이콘이 없는 개발 환경이나 맥. 창은 떠야 한다.
 
     paths: list[str] = []
-    msgs: queue.Queue[str] = queue.Queue()
+    msgs: queue.Queue = queue.Queue()
 
-    frm = ttk.Frame(root, padding=10)
-    frm.pack(fill="both", expand=True)
+    # ---- 왼쪽 사이드바 ---------------------------------------------------
+    # ttk 위젯은 배경색을 안정적으로 못 준다. 색이 필요한 곳만 raw tk 를 쓴다.
+    side = tk.Frame(root, bg=SIDE_BG, width=160)
+    side.pack(side="left", fill="y")
+    side.pack_propagate(False)
 
-    ttk.Label(frm, text="복호화할 파일 / 폴더"
-                       + ("  (여기로 끌어다 놓으세요)" if dnd else "")).pack(anchor="w")
-    lb = tk.Listbox(frm, height=8)
+    def side_text(text, fg=SIDE_DIM, size=9, pady=0, **kw):
+        lb = tk.Label(side, text=text, bg=SIDE_BG, fg=fg, anchor="w",
+                      font=("", size), **kw)
+        lb.pack(fill="x", padx=14, pady=pady)
+        return lb
+
+    side_text(APP_NAME, fg=SIDE_FG, size=13, pady=(16, 20))
+
+    target_var = tk.StringVar(value="—")
+    batch_var = tk.StringVar(value="—")
+    status_var = tk.StringVar(value="대기 중")
+
+    for caption, var in (("대상 파일", target_var), ("배치", batch_var)):
+        side_text(caption)
+        tk.Label(side, textvariable=var, bg=SIDE_BG, fg=SIDE_FG, anchor="w",
+                 font=("", 18)).pack(fill="x", padx=14, pady=(0, 14))
+
+    trough = tk.Frame(side, bg=SIDE_TROUGH, height=6)
+    trough.pack(fill="x", padx=14, pady=(2, 8))
+    trough.pack_propagate(False)
+    bar = tk.Frame(trough, bg=SIDE_BAR)
+    bar.place(relwidth=0.0, relheight=1.0)
+
+    tk.Label(side, textvariable=status_var, bg=SIDE_BG, fg=SIDE_DIM, anchor="w",
+             wraplength=132, justify="left", font=("", 9)).pack(fill="x", padx=14)
+
+    side_text("진행 중 ESC 를 누르면 중지", fg=SIDE_HINT, wraplength=132,
+              justify="left").pack_configure(side="bottom", pady=(0, 16))
+
+    # ---- 오른쪽 본문 -----------------------------------------------------
+    main = ttk.Frame(root, padding=10)
+    main.pack(side="left", fill="both", expand=True)
+
+    top = ttk.Frame(main)
+    top.pack(fill="both", expand=True)
+    top.columnconfigure(0, weight=3, uniform="pane")
+    top.columnconfigure(1, weight=2, uniform="pane")
+    top.rowconfigure(0, weight=1)
+
+    files_box = ttk.LabelFrame(
+        top, padding=8,
+        text="복호화할 파일" + ("  (여기로 끌어다 놓으세요)" if dnd else ""))
+    files_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    lb = tk.Listbox(files_box)
     lb.pack(fill="both", expand=True)
 
     def add_path(p: str):
@@ -888,9 +958,6 @@ def gui():
         lb.dnd_bind("<<Drop>>",
                     lambda e: [add_path(p) for p in root.tk.splitlist(e.data)])
 
-    row = ttk.Frame(frm)
-    row.pack(fill="x", pady=4)
-
     def add_files():
         for f in filedialog.askopenfilenames():
             add_path(f)
@@ -904,30 +971,31 @@ def gui():
         paths.clear()
         lb.delete(0, "end")
 
+    row = ttk.Frame(files_box)
+    row.pack(fill="x", pady=(6, 0))
     ttk.Button(row, text="파일 추가", command=add_files).pack(side="left")
     ttk.Button(row, text="폴더 추가", command=add_folder).pack(side="left", padx=4)
     ttk.Button(row, text="비우기", command=clear).pack(side="left")
 
-    opts = ttk.Frame(frm)
-    opts.pack(fill="x", pady=6)
+    opts = ttk.LabelFrame(top, text="저장 설정", padding=8)
+    opts.grid(row=0, column=1, sticky="nsew")
+    opts.columnconfigure(0, weight=1)
 
-    ttk.Label(opts, text="저장 위치").grid(row=0, column=0, sticky="w")
     mode_var = tk.StringVar(value="fixed")
-    modes = ttk.Frame(opts)
-    modes.grid(row=0, column=1, sticky="w", padx=4)
-    ttk.Radiobutton(modes, text="지정 폴더", variable=mode_var,
-                    value="fixed").pack(side="left")
-    ttk.Radiobutton(modes, text="원본 폴더 (원본을 덮어씁니다)", variable=mode_var,
-                    value="source").pack(side="left", padx=8)
+    ttk.Radiobutton(opts, text="지정 폴더", variable=mode_var,
+                    value="fixed").grid(row=0, column=0, columnspan=2, sticky="w")
 
-    ttk.Label(opts, text="저장 폴더").grid(row=1, column=0, sticky="w")
     dest_var = tk.StringVar(value=str(Path.home() / "Downloads"))
-    dest_entry = ttk.Entry(opts, textvariable=dest_var, width=60)
-    dest_entry.grid(row=1, column=1, padx=4)
+    dest_entry = ttk.Entry(opts, textvariable=dest_var)
+    dest_entry.grid(row=1, column=0, sticky="ew", padx=(18, 4), pady=(2, 0))
     browse_btn = ttk.Button(
-        opts, text="찾아보기",
+        opts, text="찾기", width=6,
         command=lambda: dest_var.set(filedialog.askdirectory() or dest_var.get()))
-    browse_btn.grid(row=1, column=2)
+    browse_btn.grid(row=1, column=1, pady=(2, 0))
+
+    ttk.Radiobutton(opts, text="원본 폴더 (원본을 덮어씁니다)", variable=mode_var,
+                    value="source").grid(row=2, column=0, columnspan=2,
+                                         sticky="w", pady=(8, 0))
 
     def sync_mode(*_):
         state = "disabled" if mode_var.get() == "source" else "normal"
@@ -936,19 +1004,24 @@ def gui():
 
     mode_var.trace_add("write", sync_mode)
 
-    ttk.Label(opts, text="제목 / 사유").grid(row=2, column=0, sticky="w", pady=4)
+    ttk.Label(opts, text="제목 / 사유").grid(row=3, column=0, columnspan=2,
+                                          sticky="w", pady=(14, 2))
     subject_var = tk.StringVar(value="복호화A")
-    ttk.Entry(opts, textvariable=subject_var, width=60).grid(row=2, column=1, padx=4, sticky="w")
+    ttk.Entry(opts, textvariable=subject_var).grid(row=4, column=0, columnspan=2,
+                                                   sticky="ew")
 
     precheck_var = tk.BooleanVar(value=True)
-    ttk.Checkbutton(opts, text="이미 복호화된 파일 미리 제외 (헤더 검사)",
-                    variable=precheck_var).grid(row=3, column=1, sticky="w", pady=2)
+    ttk.Checkbutton(opts, text="이미 복호화된 파일 미리 제외",
+                    variable=precheck_var).grid(row=5, column=0, columnspan=2,
+                                                sticky="w", pady=(14, 0))
 
-    logbox = tk.Text(frm, height=14, state="disabled")
-    logbox.pack(fill="both", expand=True, pady=6)
+    log_box = ttk.LabelFrame(main, text="진행 기록", padding=6)
+    log_box.pack(fill="both", expand=True, pady=(8, 0))
+    logbox = tk.Text(log_box, height=10, state="disabled")
+    logbox.pack(fill="both", expand=True)
 
-    btns = ttk.Frame(frm)
-    btns.pack(fill="x")
+    btns = ttk.Frame(main)
+    btns.pack(fill="x", pady=(8, 0))
 
     def save_dump():
         """콤보 드롭다운이나 모르는 팝업이 떴을 때 구조를 파일로 남긴다."""
@@ -964,7 +1037,6 @@ def gui():
     finished = threading.Event()
 
     ttk.Button(btns, text="창 구조 저장", command=save_dump).pack(side="left")
-    ttk.Label(btns, text="  진행 중 ESC 를 누르면 중지").pack(side="left")
     start_btn = ttk.Button(btns, text="시작")
     start_btn.pack(side="right")
     stop_btn = ttk.Button(btns, text="중지", state="disabled")
@@ -976,18 +1048,36 @@ def gui():
 
     def pump():
         while not msgs.empty():
+            m = msgs.get()
+            if isinstance(m, tuple):
+                # 워커 스레드는 Tk 위젯을 직접 못 건드린다. 큐로 받아 여기서 그린다.
+                if m[0] == "progress":
+                    _, n, total, done, _skipped = m
+                    batch_var.set(f"{n} / {total}")
+                    bar.place_configure(relwidth=(n - 1) / total)
+                    status_var.set(f"배치 {n} 처리 중 · 저장 {done}개")
+                else:
+                    saved = m[1]
+                    bar.place_configure(relwidth=1.0 if saved is not None else 0.0)
+                    status_var.set(f"완료 · 저장 {saved}개" if saved is not None
+                                   else "중단됨")
+                continue
             logbox.configure(state="normal")
-            logbox.insert("end", msgs.get() + "\n")
+            logbox.insert("end", m + "\n")
             logbox.see("end")
             logbox.configure(state="disabled")
         root.after(200, pump)
 
     def worker(files, dest, subject):
         try:
-            MarkAny(stop).run(files, dest, subject, subject)
+            saved = MarkAny(stop).run(
+                files, dest, subject, subject,
+                on_progress=lambda *a: msgs.put(("progress",) + a))
+            msgs.put(("finished", saved))
             msgs.put("완료되었습니다.")
         except Exception as e:  # noqa: BLE001
             log.error("중단: %s", e)
+            msgs.put(("finished", None))
         finally:
             finished.set()
             root.after(0, lambda: (start_btn.configure(state="normal"),
@@ -995,6 +1085,7 @@ def gui():
 
     def request_stop():
         stop.set()
+        status_var.set("중지 요청됨")
         msgs.put("중지 요청됨. 진행 중인 단계가 끝나면 멈춥니다.")
 
     def start():
@@ -1035,6 +1126,10 @@ def gui():
         batches = make_batches(files, dest)
         log.info("대상 %d개 파일, %d배치, 저장 위치: %s (중지: ESC)",
                  len(files), len(batches), "원본 폴더" if to_source else dest)
+        target_var.set(str(len(files)))
+        batch_var.set(f"0 / {len(batches)}")
+        status_var.set("시작하는 중")
+        bar.place_configure(relwidth=0.0)
         stop.clear()
         finished.clear()
         start_btn.configure(state="disabled")
@@ -1067,7 +1162,12 @@ def setup_logging(dest: Path, extra: logging.Handler | None = None):
 
 
 def selftest():
+    import inspect
     import tempfile
+
+    # GUI 사이드바가 run() 의 콜백에 매달려 있다. 인자가 사라지면 윈도우에서만
+    # 터지므로 여기서 막는다.
+    assert "on_progress" in inspect.signature(MarkAny.run).parameters
 
     assert list(chunks(list(range(32)), 15)) == [
         list(range(15)), list(range(15, 30)), [30, 31]
