@@ -886,7 +886,7 @@ def gui():
     root.title(APP_NAME)
     root.geometry("900x560")
     try:
-        root.iconbitmap(default=str(_res("MarkAnyAuto.ico")))
+        root.iconbitmap(default=str(_res("madecau.ico")))
     except Exception:  # noqa: BLE001
         pass  # 아이콘이 없는 개발 환경이나 맥. 창은 떠야 한다.
 

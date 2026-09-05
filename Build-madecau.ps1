@@ -10,7 +10,7 @@ Set-StrictMode -Version Latest
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script = Join-Path $root "markany_auto.py"
-$icon = Join-Path $root "MarkAnyAuto.ico"
+$icon = Join-Path $root "madecau.ico"
 $venv = Join-Path $root ".build\venv"
 $venvPython = Join-Path $venv "Scripts\python.exe"
 $dist = Join-Path $root "dist"
@@ -48,7 +48,7 @@ Write-Output "실행 파일 빌드..."
     --clean `
     --onefile `
     --windowed `
-    --name MarkAnyAuto `
+    --name madecau `
     --icon $icon `
     --add-data "$icon;." `
     --distpath $dist `
@@ -60,7 +60,7 @@ Write-Output "실행 파일 빌드..."
     $script
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller 빌드에 실패했습니다." }
 
-$exe = Join-Path $dist "MarkAnyAuto.exe"
+$exe = Join-Path $dist "madecau.exe"
 if (-not (Test-Path $exe)) { throw "빌드 결과가 없습니다: $exe" }
 Write-Output "실행 파일: $exe"
 
@@ -74,14 +74,14 @@ $iscc = Get-ChildItem -Path @(
 if (-not $iscc) {
     Write-Output ""
     Write-Output "Inno Setup이 없어 설치 파일은 만들지 않았습니다."
-    Write-Output "MarkAnyAuto.exe 자체가 단일 실행 파일이라 옮겨서 바로 실행할 수 있습니다."
+    Write-Output "madecau.exe 자체가 단일 실행 파일이라 옮겨서 바로 실행할 수 있습니다."
     Write-Output "설치 형태가 필요하면 https://jrsoftware.org/isdl.php 에서 Inno Setup 6을 설치한 뒤 다시 실행하세요."
     exit 0
 }
 
 # .iss 는 저장소에 그대로 둔다. PowerShell 문자열로 만들어 다시 쓰면
 # 인코딩을 한 번 더 거치면서 한글이 깨지고 지시자가 통째로 사라진다.
-$issPath = Join-Path $root "MarkAnyAuto.iss"
+$issPath = Join-Path $root "madecau.iss"
 if (-not (Test-Path $issPath)) { throw "설치 스크립트가 없습니다: $issPath" }
 
 Write-Output "설치 파일 빌드..."
@@ -89,5 +89,5 @@ Write-Output "설치 파일 빌드..."
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup 빌드에 실패했습니다." }
 
 Write-Output ""
-Write-Output "설치 파일: $(Join-Path $dist 'MarkAnyAuto-Setup.exe')"
+Write-Output "설치 파일: $(Join-Path $dist 'madecau-Setup.exe')"
 Write-Output "이 파일 하나만 옮겨서 설치하면 됩니다."

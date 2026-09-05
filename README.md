@@ -28,22 +28,22 @@ JSON에는 입력값 자체를 수집하지 않지만 창 제목과 버튼 이�
 Windows PC에서 Python 3.10 이상을 설치한 뒤 실행합니다. 나머지는 스크립트가 알아서 합니다.
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-MarkAnyAuto.ps1 -SelfTest
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-MarkAnyAuto.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-madecau.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build-madecau.ps1
 ```
 
-- `dist\MarkAnyAuto.exe` — 단일 실행 파일. 그대로 복사해서 바로 실행할 수 있습니다.
-- `dist\MarkAnyAuto-Setup.exe` — [Inno Setup 6](https://jrsoftware.org/isdl.php)이 설치되어 있을 때만 함께 생성됩니다. 이 파일 하나만 옮겨서 설치하면 시작 메뉴와 바탕화면에 등록됩니다. 관리자 권한은 필요 없습니다.
+- `dist\madecau.exe` — 단일 실행 파일. 그대로 복사해서 바로 실행할 수 있습니다.
+- `dist\madecau-Setup.exe` — [Inno Setup 6](https://jrsoftware.org/isdl.php)이 설치되어 있을 때만 함께 생성됩니다. 이 파일 하나만 옮겨서 설치하면 시작 메뉴와 바탕화면에 등록됩니다. 관리자 권한은 필요 없습니다.
 
 설치 파일이 필요 없으면 `-SkipInstaller` 를 붙입니다.
 
 설치 화면과 제어판 프로그램 목록에는 이름이 `madecau`, 개발자가 `김지현` 으로 뜹니다.
 창 제목과 사이드바에도 같은 이름이 나옵니다 (`markany_auto.py` 의 `APP_NAME`).
-`MarkAnyAuto.iss` 의 `AppName` / `AppPublisher` 입니다.
+`madecau.iss` 의 `AppName` / `AppPublisher` 입니다.
 
 ### 아이콘
 
-`MarkAnyAuto.ico` 는 저장소에 들어 있습니다. 빌드 스크립트가 exe 에 박고 설치 파일에도 씁니다.
+`madecau.ico` 는 저장소에 들어 있습니다. 빌드 스크립트가 exe 에 박고 설치 파일에도 씁니다.
 모양을 고치려면 `tools/make_icon.py` 를 손보고 다시 굽습니다 (Pillow 필요, 빌드에는 안 쓰입니다).
 
 ```bash
@@ -53,7 +53,7 @@ python3 tools/make_icon.py
 MarkAny 마크의 각진 아스테리스크를 변형해 가운데를 열쇠구멍으로 뚫은 모양입니다.
 16/32px 는 구멍이 메워지므로 구멍을 키운 별도 도안에서 뽑습니다.
 
-> `Build-MarkAnyAuto.ps1` 과 `MarkAnyAuto.iss` 는 **UTF-8 BOM**으로 저장해야 합니다.
+> `Build-madecau.ps1` 과 `madecau.iss` 는 **UTF-8 BOM**으로 저장해야 합니다.
 > BOM이 없으면 Windows PowerShell 5.1이 파일을 CP949로 읽어 한글이 깨지고, Inno Setup이 `[Setup]` 지시자를 인식하지 못합니다.
 
 ## 자동화 실행

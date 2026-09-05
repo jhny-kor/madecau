@@ -1,4 +1,4 @@
-"""MarkAnyAuto.ico 를 굽는다.  실행:  python3 tools/make_icon.py
+"""madecau.ico 를 굽는다.  실행:  python3 tools/make_icon.py
 
 MarkAny 의 각진 아스테리스크 마크를 변형해 가운데를 열쇠구멍으로 뚫었다.
 16/32px 는 구멍이 메워지므로 구멍을 키운 별도 도안에서 뽑는다.
@@ -40,7 +40,7 @@ def draw(half: float, hole: float) -> Image.Image:
 
 
 def main():
-    out = Path(__file__).resolve().parent.parent / "MarkAnyAuto.ico"
+    out = Path(__file__).resolve().parent.parent / "madecau.ico"
     big, small = draw(0.145, 0.118), draw(0.175, 0.150)
     frames = [big.resize((s, s), Image.LANCZOS) for s in (256, 48)]
     frames += [small.resize((s, s), Image.LANCZOS) for s in (32, 16)]
