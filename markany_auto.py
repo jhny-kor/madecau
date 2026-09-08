@@ -21,6 +21,7 @@ from pathlib import Path, PureWindowsPath
 APP_NAME = "madecau"
 
 BATCH_SIZE = 15  # 반출 신청 팝업의 "(개수 : 15 / 사이즈 : 무제한)"
+ESAGENT_EXE = Path(r"C:\MarkAny\Common\ESAgent.exe")
 
 # ponytail: 파일명 칸은 MAX_PATH(260자) 근처에서 입력을 잘라낸다. 여유를 두고
 # 나눠 넣고, 실제로 잘렸는지는 입력 후 읽어서 확인한다.
@@ -206,9 +207,37 @@ class MarkAny:
         from pywinauto import Application  # Windows 전용이라 지연 import
 
         self.stop = stop
-        self.app = Application(backend="win32").connect(title=MAIN_TITLE, timeout=15)
+        try:
+            self.app = Application(backend="win32").connect(
+                title=MAIN_TITLE, timeout=3)
+            log.info("기존 ESAgent 창에 연결")
+        except Exception as title_error:  # noqa: BLE001
+            try:
+                self.app = Application(backend="win32").connect(
+                    path=str(ESAGENT_EXE), timeout=3)
+                log.info("기존 ESAgent 프로세스에 연결")
+            except Exception:  # noqa: BLE001
+                if not ESAGENT_EXE.is_file():
+                    raise FileNotFoundError(
+                        f"ESAgent.exe를 찾지 못했습니다: {ESAGENT_EXE}"
+                    ) from title_error
+                log.info("ESAgent 실행: %s", ESAGENT_EXE)
+                try:
+                    self.app = Application(backend="win32").start(
+                        str(ESAGENT_EXE), timeout=30)
+                except Exception as launch_error:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"ESAgent.exe를 실행하지 못했습니다: {ESAGENT_EXE}"
+                    ) from launch_error
         self.main = self.app.window(title=MAIN_TITLE)
-        self.main.wait("visible ready", timeout=15)
+        try:
+            self.main.wait("visible ready", timeout=15)
+        except Exception as error:  # noqa: BLE001
+            raise RuntimeError(
+                f"ESAgent 창({MAIN_TITLE})이 준비되지 않았습니다: {ESAGENT_EXE}"
+            ) from error
+        self.main.restore()
+        self.main.set_focus()
         # 우리가 여는 창들. 팝업 청소 대상에서 뺀다. 제목으로 거르면 확인
         # 메시지박스가 상세 창과 제목이 같아("문서반출") 같이 걸러진다.
         self._own = {self.main.wrapper_object().handle}
