@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +23,7 @@ APP_NAME = "madecau"
 
 BATCH_SIZE = 15  # 반출 신청 팝업의 "(개수 : 15 / 사이즈 : 무제한)"
 ESAGENT_EXE = Path(r"C:\MarkAny\Common\ESAgent.exe")
+ESAGENT_START_WAIT = 10.0
 
 # ponytail: 파일명 칸은 MAX_PATH(260자) 근처에서 입력을 잘라낸다. 여유를 두고
 # 나눠 넣고, 실제로 잘렸는지는 입력 후 읽어서 확인한다.
@@ -222,10 +224,18 @@ class MarkAny:
                 ) from existing_error
             log.info("보이는 ESAgent 창이 없어 실행: %s", ESAGENT_EXE)
             try:
-                self.app = Application(backend="win32").start(
-                    str(ESAGENT_EXE), timeout=30)
+                subprocess.Popen([str(ESAGENT_EXE)],
+                                 cwd=str(ESAGENT_EXE.parent))
+                log.info("ESAgent 실행 후 %.0f초 대기", ESAGENT_START_WAIT)
+                time.sleep(ESAGENT_START_WAIT)
+                # 실행 파일이 실제 창을 다른 프로세스에서 만들 수 있으므로
+                # start()가 붙잡은 프로세스가 아닌 현재 보이는 창에 연결한다.
+                self.app = Application(backend="win32").connect(
+                    title=MAIN_TITLE, timeout=3)
                 self.main = self.app.window(title=MAIN_TITLE)
-                self.main.wait("visible ready", timeout=30)
+                self.main.wait("exists", timeout=3)
+                if not self.main.is_visible():
+                    raise RuntimeError("실행 후에도 MADRMAgent 창이 보이지 않습니다.")
             except Exception as launch_error:  # noqa: BLE001
                 raise RuntimeError(
                     f"ESAgent 창({MAIN_TITLE})을 준비하지 못했습니다: {ESAGENT_EXE}"
@@ -1029,7 +1039,7 @@ def gui():
 
     ttk.Label(opts, text="제목 / 사유").grid(row=3, column=0, columnspan=2,
                                           sticky="w", pady=(14, 2))
-    subject_var = tk.StringVar(value="복호화A")
+    subject_var = tk.StringVar(value="자동복호화사유")
     ttk.Entry(opts, textvariable=subject_var).grid(row=4, column=0, columnspan=2,
                                                    sticky="ew")
 
