@@ -210,32 +210,26 @@ class MarkAny:
         try:
             self.app = Application(backend="win32").connect(
                 title=MAIN_TITLE, timeout=3)
-            log.info("기존 ESAgent 창에 연결")
-        except Exception as title_error:  # noqa: BLE001
+            self.main = self.app.window(title=MAIN_TITLE)
+            self.main.wait("exists", timeout=3)
+            if not self.main.is_visible():
+                raise RuntimeError("MADRMAgent 창이 보이지 않습니다.")
+            log.info("기존 ESAgent 창을 그대로 사용")
+        except Exception as existing_error:  # noqa: BLE001
+            if not ESAGENT_EXE.is_file():
+                raise FileNotFoundError(
+                    f"ESAgent.exe를 찾지 못했습니다: {ESAGENT_EXE}"
+                ) from existing_error
+            log.info("보이는 ESAgent 창이 없어 실행: %s", ESAGENT_EXE)
             try:
-                self.app = Application(backend="win32").connect(
-                    path=str(ESAGENT_EXE), timeout=3)
-                log.info("기존 ESAgent 프로세스에 연결")
-            except Exception:  # noqa: BLE001
-                if not ESAGENT_EXE.is_file():
-                    raise FileNotFoundError(
-                        f"ESAgent.exe를 찾지 못했습니다: {ESAGENT_EXE}"
-                    ) from title_error
-                log.info("ESAgent 실행: %s", ESAGENT_EXE)
-                try:
-                    self.app = Application(backend="win32").start(
-                        str(ESAGENT_EXE), timeout=30)
-                except Exception as launch_error:  # noqa: BLE001
-                    raise RuntimeError(
-                        f"ESAgent.exe를 실행하지 못했습니다: {ESAGENT_EXE}"
-                    ) from launch_error
-        self.main = self.app.window(title=MAIN_TITLE)
-        try:
-            self.main.wait("visible ready", timeout=15)
-        except Exception as error:  # noqa: BLE001
-            raise RuntimeError(
-                f"ESAgent 창({MAIN_TITLE})이 준비되지 않았습니다: {ESAGENT_EXE}"
-            ) from error
+                self.app = Application(backend="win32").start(
+                    str(ESAGENT_EXE), timeout=30)
+                self.main = self.app.window(title=MAIN_TITLE)
+                self.main.wait("visible ready", timeout=30)
+            except Exception as launch_error:  # noqa: BLE001
+                raise RuntimeError(
+                    f"ESAgent 창({MAIN_TITLE})을 준비하지 못했습니다: {ESAGENT_EXE}"
+                ) from launch_error
         self.main.restore()
         self.main.set_focus()
         # 우리가 여는 창들. 팝업 청소 대상에서 뺀다. 제목으로 거르면 확인
